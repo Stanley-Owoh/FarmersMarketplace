@@ -3,6 +3,7 @@ const config = require('../config');
 const db = require('../db/schema');
 const { StellarSdk, isTestnet, server, sorobanServer, networkPassphrase } = require('./stellar-config');
 const logger = require('../logger');
+const { decryptUserSecretKey } = require('./crypto');
 
 function normalizeWasmHash(h) {
   if (h == null || typeof h !== 'string') return null;
@@ -464,6 +465,69 @@ async function invokeContract({ contractId, method, args = [], signerSecret }) {
   throw new Error('Transaction confirmation timeout');
 }
 
+async function recordCarbonOffset({ orderId, kgCo2, verifierPublicKey, verifierSecret }) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  const adminSecret = process.env.CARBON_OFFSET_ADMIN_SECRET;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  if (!adminSecret) throw new Error('CARBON_OFFSET_ADMIN_SECRET is not configured');
+  if (!verifierSecret) throw new Error('Verifier Stellar secret is not available');
+
+  const numericOrderId = Number(orderId);
+  const numericKgCo2 = Number(kgCo2);
+  if (!Number.isSafeInteger(numericOrderId) || numericOrderId < 0) {
+    throw new Error('orderId must be a non-negative safe integer');
+  }
+  if (!Number.isFinite(numericKgCo2) || numericKgCo2 <= 0) {
+    throw new Error('kgCo2 must be positive');
+  }
+  const verifiedKgCo2 = Math.ceil(numericKgCo2);
+  const verifierKeypair = StellarSdk.Keypair.fromSecret(
+    await decryptUserSecretKey(verifierSecret)
+  );
+  if (verifierKeypair.publicKey() !== verifierPublicKey) {
+    throw new Error('Verifier secret does not match verifierPublicKey');
+  }
+
+  const commonArgs = [
+    { type: 'u64', value: numericOrderId },
+    { type: 'u64', value: verifiedKgCo2 },
+    { type: 'address', value: verifierPublicKey },
+  ];
+  const verifierAuthorization = await invokeContract({
+    contractId,
+    method: 'authorize_offset',
+    args: commonArgs,
+    signerSecret: verifierKeypair.secret(),
+  });
+  const record = await invokeContract({
+    contractId,
+    method: 'record_offset',
+    args: commonArgs,
+    signerSecret: adminSecret,
+  });
+
+  return {
+    contractId,
+    verifierTxHash: verifierAuthorization.hash,
+    txHash: record.hash,
+  };
+}
+
+async function getCarbonOffset(orderId) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+
+  const sim = await simulateContractCall(contractId, 'get_offset', [
+    { type: 'u64', value: Number(orderId) },
+  ]);
+  if (!sim.success) {
+    const error = new Error(`Failed to read carbon offset: ${sim.error || 'simulation failed'}`);
+    error.code = 'carbon_offset_read_failed';
+    throw error;
+  }
+  return sim.result ?? null;
+}
+
 /**
  * Simpler simulation wrapper used by admin routes — does not support typed arg objects.
  * Uses `PLATFORM_WALLET_PUBLIC_KEY` as the source account.
@@ -752,6 +816,8 @@ module.exports = {
   invokeEscrowContract,
   getEscrowState,
   invokeContract,
+  recordCarbonOffset,
+  getCarbonOffset,
   simulateContract,
   getContractABI,
   analyzeContractFees,

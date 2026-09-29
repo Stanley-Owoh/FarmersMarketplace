@@ -23,8 +23,13 @@ async function getTierPrice(productId, quantity) {
   const { rows: productRows } = await db.query('SELECT price FROM products WHERE id = $1', [
     productId,
   ]);
-  logger.debug('[getTierPrice] No tier matched, using base price', { productId, quantity, base_price: productRows[0].price });
-  return productRows[0].price;
+  const basePrice = productRows[0]?.price;
+  if (basePrice == null) {
+    logger.debug('[getTierPrice] No tier matched and no base price found', { productId, quantity });
+    return 0;
+  }
+  logger.debug('[getTierPrice] No tier matched, using base price', { productId, quantity, base_price: basePrice });
+  return Number(basePrice);
 }
 
 // Resolve a coupon row and validate it against a farmer + total

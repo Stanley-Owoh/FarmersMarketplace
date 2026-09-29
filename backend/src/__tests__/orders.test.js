@@ -32,8 +32,9 @@ beforeEach(() => {
 });
 
 const SECRET = process.env.JWT_SECRET;
-const buyerToken = jwt.sign({ id: 2, role: 'buyer' }, SECRET);
-const farmerToken = jwt.sign({ id: 1, role: 'farmer' }, SECRET);
+const buyerToken = jwt.sign({ id: 2, role: 'buyer', email_verified_at: new Date().toISOString() }, SECRET);
+const farmerToken = jwt.sign({ id: 1, role: 'farmer', email_verified_at: new Date().toISOString() }, SECRET);
+const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
 const product = {
   id: 10,
@@ -80,9 +81,11 @@ describe('POST /api/orders', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 2 });
 
+    console.log('RES BODY', res.status, res.body);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('paid');
     expect(res.body.txHash).toBe('FAKE_TX_HASH_ABC');
@@ -92,6 +95,7 @@ describe('POST /api/orders', () => {
   it('returns 403 when a farmer tries to place an order', async () => {
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${farmerToken}`)
       .send({ product_id: 10, quantity: 1 });
     expect(res.status).toBe(403);
@@ -112,6 +116,7 @@ describe('POST /api/orders', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 10000 });
 
@@ -121,6 +126,7 @@ describe('POST /api/orders', () => {
   it('returns 400 when quantity exceeds MAX_ORDER_QUANTITY (10000)', async () => {
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 10001 });
 
@@ -137,6 +143,7 @@ describe('POST /api/orders', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 999 });
 
@@ -158,6 +165,7 @@ describe('POST /api/orders', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -169,6 +177,7 @@ describe('POST /api/orders', () => {
   it('returns 400 for zero quantity', async () => {
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 0 });
     expect(res.status).toBe(400);
@@ -179,6 +188,7 @@ describe('POST /api/orders', () => {
   it('returns 400 for negative quantity', async () => {
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: -5 });
     expect(res.status).toBe(400);
@@ -204,6 +214,7 @@ describe('POST /api/orders', () => {
 
     await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 2 });
 
@@ -315,6 +326,7 @@ describe('Pre-order flows', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 2 });
 
@@ -378,6 +390,7 @@ describe('PWYW min_price validation', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1, custom_price: 1.0 });
 
@@ -393,6 +406,7 @@ describe('PWYW min_price validation', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -405,6 +419,7 @@ describe('PWYW min_price validation', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1, custom_price: 3.0 });
 
@@ -417,6 +432,7 @@ describe('PWYW min_price validation', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1, custom_price: 10.0 });
 
@@ -439,6 +455,7 @@ describe('PWYW min_price validation', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -482,6 +499,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -501,6 +519,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -520,6 +539,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -542,6 +562,7 @@ describe('Flash sale time-window enforcement', () => {
     const res = await request(app)
       .post('/api/orders')
       .set('Authorization', `Bearer ${buyerToken}`)
+      .set('X-Idempotency-Key', VALID_UUID)
       // Client does not send any flash-sale timing fields — server still rejects
       .send({ product_id: 10, quantity: 1 });
 
@@ -555,6 +576,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -573,6 +595,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -592,6 +615,7 @@ describe('Flash sale time-window enforcement', () => {
 
     const res = await request(app)
       .post('/api/orders')
+      .set('X-Idempotency-Key', VALID_UUID)
       .set('Authorization', `Bearer ${buyerToken}`)
       .send({ product_id: 10, quantity: 1 });
 
@@ -656,5 +680,55 @@ describe('POST /api/orders — idempotency (#802)', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('idempotency_unavailable');
+  });
+});
+
+describe('Carbon offsets', () => {
+  it('returns 404 when the optional on-chain record is absent', async () => {
+    mockDb.query.mockResolvedValueOnce({
+      rows: [{ id: 42, buyer_id: 2, farmer_id: 1 }],
+      rowCount: 1,
+    });
+    stellar.getCarbonOffset.mockResolvedValueOnce(null);
+
+    const res = await request(app)
+      .get('/api/orders/42/carbon')
+      .set('Authorization', `Bearer ${buyerToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('not_found');
+  });
+
+  it('uses the farmer wallet to authorize the offset before admin recording', async () => {
+    mockDb.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 42,
+          buyer_id: 2,
+          product_name: 'Apples',
+          unit: 'kg',
+          category: 'vegetables',
+          carbon_kg_per_unit: 0.4,
+          quantity: 3,
+          buyer_name: 'Test Buyer',
+          buyer_email: 'buyer@example.com',
+          farmer_wallet: 'GFARMER123',
+          farmer_secret: 'ENCRYPTED_FARMER_SECRET',
+        }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    stellar.recordCarbonOffset.mockResolvedValueOnce({ txHash: 'OFFSET_TX' });
+
+    const res = await request(app)
+      .patch('/api/orders/42/status')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .send({ status: 'delivered' });
+    expect(res.status).toBe(200);
+    expect(stellar.recordCarbonOffset).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 42,
+      verifierPublicKey: 'GFARMER123',
+      verifierSecret: 'ENCRYPTED_FARMER_SECRET',
+    }));
   });
 });

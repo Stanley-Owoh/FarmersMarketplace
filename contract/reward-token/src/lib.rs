@@ -124,6 +124,56 @@ impl RewardToken {
         );
     }
 
+    fn mint_internal(env: &Env, to: &Address, amount: i128, is_order_reward: bool) {
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let new_supply = supply.checked_add(amount).expect("total supply overflow");
+        let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
+        if max_supply > 0 && new_supply > max_supply {
+            if is_order_reward {
+                panic!("MaxSupplyExceeded");
+            }
+            panic!("mint would exceed max_supply cap");
+        }
+
+        let balance = Self::balance(env.clone(), to.clone());
+        Self::set_balance(env, to, balance + amount);
+
+        let vesting_period: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VestingPeriod)
+            .unwrap_or(0);
+        if vesting_period > 0 {
+            let current_ledger = env.ledger().sequence();
+            let unlock_ledger = current_ledger.saturating_add(vesting_period);
+            let vesting_key = DataKey::Vesting(to.clone(), current_ledger);
+            let entry = VestingEntry {
+                locked_amount: amount,
+                unlock_ledger,
+            };
+            env.storage().persistent().set(&vesting_key, &entry);
+            let ttl = vesting_period.saturating_add(Self::vesting_ttl_buffer());
+            env.storage().persistent().extend_ttl(&vesting_key, ttl, ttl);
+
+            let index_key = DataKey::VestingIndex(to.clone());
+            let mut index: Vec<u32> = env
+                .storage()
+                .persistent()
+                .get(&index_key)
+                .unwrap_or(Vec::new(env));
+            index.push_back(current_ledger);
+            env.storage().persistent().set(&index_key, &index);
+            env.storage().persistent().extend_ttl(&index_key, ttl, ttl);
+        }
+
+        env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
+        env.events().publish(("mint", to.clone()), amount);
+    }
+
     // TTL buffer added on top of the vesting period when extending vesting entry TTL.
     const fn vesting_ttl_buffer() -> u32 { 10_000 }
 
@@ -158,13 +208,13 @@ impl RewardToken {
     }
 
     /// Sets the burn-on-transfer fee in basis points (#685).
-    /// 0 = disabled, 100 = 1%, 10000 = 100% (max).
+    /// 0 = disabled; values must be less than 10000 basis points.
     /// Only the admin may call this.
     pub fn set_transfer_fee(env: Env, fee_bps: u32) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        if fee_bps > 10_000 {
-            panic!("fee_bps must be <= 10000");
+        if fee_bps >= 10_000 {
+            panic!("fee_bps must be < 10000");
         }
         env.storage().instance().set(&DataKey::TransferFeeBps, &fee_bps);
         env.events().publish(("set_transfer_fee",), fee_bps);
@@ -191,7 +241,7 @@ impl RewardToken {
     /// Mint reward tokens proportional to `xlm_amount` using reward_rate_bps (#846).
     /// tokens = xlm_amount * reward_rate_bps / 10000
     /// Returns MaxSupplyExceeded error code (via panic) if minting would exceed the cap.
-    /// Admin must authorize this call.
+    /// The configured minter must authorize this call.
     ///
     /// #1234 — this reads then writes `DataKey::TotalSupply` without a
     /// compare-and-swap. That's sound only because Soroban serializes
@@ -201,8 +251,8 @@ impl RewardToken {
     /// execution ever becomes concurrent/batched, this check-then-act must be
     /// replaced with an atomic update.
     pub fn mint_for_order(env: Env, to: Address, xlm_amount: i128) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+        let minter: Address = env.storage().instance().get(&DataKey::Minter).expect("minter not set");
+        minter.require_auth();
         if xlm_amount <= 0 {
             panic!("xlm_amount must be positive");
         }
@@ -214,69 +264,13 @@ impl RewardToken {
         if amount <= 0 {
             return;
         }
-
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
-        if max_supply > 0 && supply + amount > max_supply {
-            panic!("MaxSupplyExceeded");
-        }
-
-        let balance = Self::balance(env.clone(), to.clone());
-        Self::set_balance(&env, &to, balance + amount);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
-        env.events().publish(("mint", to.clone()), amount);
+        Self::mint_internal(&env, &to, amount, true);
     }
 
     pub fn mint(env: Env, to: Address, amount: i128) {
         let minter: Address = env.storage().instance().get(&DataKey::Minter).expect("minter not set");
         minter.require_auth();
-        if amount <= 0 {
-            panic!("amount must be positive");
-        }
-
-        // #696 — enforce total supply cap if one is set.
-        // #1234 — see the atomicity note on mint_for_order(): this
-        // check-then-act on TotalSupply relies on Soroban's per-ledger
-        // invocation serialization, not on any lock here.
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
-        if max_supply > 0 && supply + amount > max_supply {
-            panic!("mint would exceed max_supply cap");
-        }
-
-        let balance = Self::balance(env.clone(), to.clone());
-        Self::set_balance(&env, &to, balance + amount);
-
-        // #693 — record a vesting lock if a vesting period is configured.
-        let vesting_period: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::VestingPeriod)
-            .unwrap_or(0);
-        if vesting_period > 0 {
-            let current_ledger = env.ledger().sequence();
-            let unlock_ledger = current_ledger.saturating_add(vesting_period);
-            let vesting_key = DataKey::Vesting(to.clone(), current_ledger);
-            let entry = VestingEntry { locked_amount: amount, unlock_ledger };
-            env.storage().persistent().set(&vesting_key, &entry);
-            // Keep the vesting entry alive at least until it unlocks.
-            let ttl = vesting_period.saturating_add(Self::vesting_ttl_buffer());
-            env.storage().persistent().extend_ttl(&vesting_key, ttl, ttl);
-
-            // #1235 — record this mint_ledger in the holder's own index so
-            // vested_balance()/transfer_vested() never have to trust a
-            // caller-supplied list of mint_ledgers.
-            let index_key = DataKey::VestingIndex(to.clone());
-            let mut index: Vec<u32> = env.storage().persistent().get(&index_key).unwrap_or(Vec::new(&env));
-            index.push_back(current_ledger);
-            env.storage().persistent().set(&index_key, &index);
-            env.storage().persistent().extend_ttl(&index_key, ttl, ttl);
-        }
-
-        env.events().publish(("mint", to.clone()), amount);
-
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        Self::mint_internal(&env, &to, amount, false);
     }
 
     // -----------------------------------------------------------------------
@@ -456,14 +450,17 @@ impl RewardToken {
         }
 
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let new_supply = supply
+            .checked_add(token_amount)
+            .expect("total supply overflow");
         let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
-        if max_supply > 0 && supply + token_amount > max_supply {
+        if max_supply > 0 && new_supply > max_supply {
             panic!("reissue would exceed max_supply cap");
         }
 
         let balance = Self::balance(env.clone(), buyer.clone());
         Self::set_balance(&env, &buyer, balance + token_amount);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + token_amount));
+        env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
         redemption.reissued = true;
         Self::set_redemption(&env, &buyer, order_id, &redemption);
         env.events().publish(("reward", "reissued", buyer, order_id), token_amount);
@@ -698,6 +695,10 @@ impl RewardToken {
         if new_max_supply < 0 {
             panic!("max_supply must be non-negative");
         }
+        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        if new_max_supply > 0 && new_max_supply < supply {
+            panic!("max_supply cannot be less than total_supply");
+        }
         env.storage().instance().set(&DataKey::MaxSupply, &new_max_supply);
         env.events().publish(("max_supply_updated",), new_max_supply);
     }
@@ -916,12 +917,30 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "fee_bps must be <= 10000")]
+    #[should_panic(expected = "fee_bps must be < 10000")]
     fn test_set_transfer_fee_above_max_panics() {
         let env = Env::default();
         let (client, admin, _minter) = setup_token(&env);
         env.mock_auths(&[&admin]);
         client.set_transfer_fee(&10_001);
+    }
+
+    #[test]
+    #[should_panic(expected = "fee_bps must be < 10000")]
+    fn test_set_transfer_fee_at_full_burn_panics() {
+        let env = Env::default();
+        let (client, admin, _minter) = setup_token(&env);
+        env.mock_auths(&[&admin]);
+        client.set_transfer_fee(&10_000);
+    }
+
+    #[test]
+    fn test_transfer_fee_below_full_burn_is_allowed() {
+        let env = Env::default();
+        let (client, admin, _minter) = setup_token(&env);
+        env.mock_auths(&[&admin]);
+        client.set_transfer_fee(&9_999);
+        assert_eq!(client.transfer_fee_bps(), 9_999);
     }
 
     #[test]
@@ -1146,10 +1165,22 @@ mod test {
         let admin = Address::generate(&env);
         let minter = Address::generate(&env);
         let user = Address::generate(&env);
-        client.initialize(&admin, &minter, &7, &String::from_str(&env, "Farmers Reward"), &String::from_str(&env, "FRT"));
+        client.initialize(
+            &admin,
+            &minter,
+            &7,
+            &String::from_str(&env, "Farmers Reward"),
+            &String::from_str(&env, "FRT"),
+            &0,
+        );
         env.mock_auths(&[&minter]);
         client.mint(&user, &250);
-        let stored: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone())).unwrap_or(0);
+        let stored = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Balance(user.clone()))
+                .unwrap_or(0)
+        });
         assert_eq!(stored, 250, "balance must be stored under DataKey::Balance");
         let client2 = RewardTokenClient::new(&env, &env.register_contract(Some(contract_id), RewardToken));
         assert_eq!(client2.balance(&user), 250);
@@ -1189,14 +1220,42 @@ mod test {
     #[test]
     fn test_mint_for_order_rate_calculation() {
         let env = Env::default();
-        let (client, _admin) = setup_token(&env);
+        let (client, admin, minter) = setup_token(&env);
         let user = Address::generate(&env);
-        env.mock_all_auths();
+        env.mock_auths(&[&admin]);
         client.set_reward_rate(&100); // 1% = 100 bps
+        env.mock_auths(&[&minter]);
         // 10,000 XLM * 100 bps / 10,000 = 100 tokens
         client.mint_for_order(&user, &10_000);
         assert_eq!(client.balance(&user), 100);
         assert_eq!(client.total_supply(), 100);
+    }
+
+    #[test]
+    fn test_mint_for_order_obeys_vesting() {
+        let env = Env::default();
+        let (client, admin, minter) = setup_token(&env);
+        let user = Address::generate(&env);
+        env.mock_auths(&[&admin]);
+        client.set_reward_rate(&10_000);
+        client.set_vesting_period(&100);
+        env.mock_auths(&[&minter]);
+
+        client.mint_for_order(&user, &100);
+
+        assert_eq!(client.balance(&user), 100);
+        assert_eq!(client.vested_balance(&user), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_mint_for_order_requires_minter_not_admin() {
+        let env = Env::default();
+        let (client, admin, _minter) = setup_token(&env);
+        let user = Address::generate(&env);
+        env.mock_auths(&[&admin]);
+        client.set_reward_rate(&10_000);
+        client.mint_for_order(&user, &100);
     }
 
     #[test]
@@ -1218,11 +1277,20 @@ mod test {
         let contract_id = env.register_contract(None, RewardToken);
         let client = RewardTokenClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let minter = Address::generate(&env);
         let user = Address::generate(&env);
         // cap = 50 tokens
-        client.initialize(&admin, &7, &String::from_str(&env, "FRT"), &String::from_str(&env, "FRT"), &50);
-        env.mock_all_auths();
+        client.initialize(
+            &admin,
+            &minter,
+            &7,
+            &String::from_str(&env, "FRT"),
+            &String::from_str(&env, "FRT"),
+            &50,
+        );
+        env.mock_auths(&[&admin]);
         client.set_reward_rate(&10_000); // 100% rate → 1 XLM = 1 token
+        env.mock_auths(&[&minter]);
         client.mint_for_order(&user, &100); // would mint 100 tokens, cap is 50
     }
 
@@ -1233,6 +1301,8 @@ mod test {
         let (client, _admin) = setup_token(&env);
         // No mock_all_auths — auth will fail for non-admin
         client.set_reward_rate(&100);
+    }
+
     // ── #849 minter role tests ─────────────────────────────────────────────────
 
     #[test]
@@ -1283,6 +1353,18 @@ mod test {
         let user = Address::generate(&env);
         client.mint(&user, &500_000);
         assert_eq!(client.remaining_supply(), 500_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_supply cannot be less than total_supply")]
+    fn test_set_max_supply_cannot_fall_below_current_supply() {
+        let env = Env::default();
+        let (client, admin, minter) = setup_token(&env);
+        let user = Address::generate(&env);
+        env.mock_auths(&[&minter]);
+        client.mint(&user, &100);
+        env.mock_auths(&[&admin]);
+        client.set_max_supply(&99);
     }
 
     #[test]

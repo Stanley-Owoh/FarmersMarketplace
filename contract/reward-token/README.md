@@ -49,3 +49,7 @@ can be read or changed.
 Redemptions are tracked per buyer and order. A buyer can redeem once for an
 order, and an admin refund reissue must restore the exact redeemed amount once;
 the on-chain redemption record is kept alive for roughly 289 days.
+
+`mint_for_order` is authorized by the configured minter and follows the same
+supply-cap and vesting path as `mint`. The transfer fee must be below 100%,
+and a nonzero maximum supply cannot be lowered below current total supply.

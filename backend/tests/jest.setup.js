@@ -15,6 +15,7 @@ process.env.RATE_LIMIT_ORDER_MAX = '10000';
 process.env.RATE_LIMIT_SEND_MAX = '10000';
 process.env.WEB_PUSH_VAPID_PUBLIC_KEY = process.env.WEB_PUSH_VAPID_PUBLIC_KEY || 'test-vapid-public-key';
 process.env.WEB_PUSH_VAPID_PRIVATE_KEY = process.env.WEB_PUSH_VAPID_PRIVATE_KEY || 'test-vapid-private-key';
+process.env.RATE_LIMIT_ORDER_USER_MAX = process.env.RATE_LIMIT_ORDER_USER_MAX || '10000';
 
 // --- DB mock ---
 jest.mock('../src/db/schema', () => ({
@@ -43,6 +44,11 @@ jest.mock('../src/utils/stellar', () => ({
   getTransactions: jest.fn().mockResolvedValue([]),
   fundTestnetAccount: jest.fn().mockResolvedValue({}),
   sendPayment:        jest.fn().mockResolvedValue('TXHASH123'),
+  getPlatformFeeInfo: jest.fn((amount) => ({ feePercent: 0, feeAmount: 0, farmerAmount: amount, platformWallet: null })),
+  getPathPaymentSendMax: jest.fn((sourceAmount, slippagePercent = 0.5) => Number(sourceAmount) * (1 + slippagePercent / 100)),
+  getPathPaymentEstimate: jest.fn().mockResolvedValue({ sourceAmount: 2, path: [] }),
+  generatePaymentLink: jest.fn(() => 'web+stellar:pay?destination=TEST'),
+  getMemo: jest.fn().mockResolvedValue(null),
   createWallet:           jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
   getBalance:             jest.fn().mockResolvedValue(1000),
   getTransactions:        jest.fn().mockResolvedValue([]),
@@ -55,8 +61,11 @@ jest.mock('../src/utils/stellar', () => ({
   getContractState:       jest.fn(),
   getContractWasmHash:    jest.fn().mockResolvedValue('0'.repeat(64)),
   simulateContractCall:   jest.fn(),
+  recordCarbonOffset:     jest.fn().mockResolvedValue({}),
+  getCarbonOffset:        jest.fn(),
   invokeContract:         jest.fn(),
   invokeEscrowContract:   jest.fn().mockResolvedValue({ txHash: 'ESCROW_TX' }),
+  mintRewardTokens:       jest.fn().mockResolvedValue({}),
   burnRewardTokens:       jest.fn().mockResolvedValue({}),
   sendPayment: jest.fn().mockResolvedValue('TXHASH123'),
   createWallet: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
@@ -77,7 +86,10 @@ jest.mock('../src/utils/stellar', () => ({
 // --- Missing utility mocks ---
 jest.mock('../src/utils/cdn', () => ({ rewriteImageUrl: (url) => url }));
 jest.mock('../src/utils/pushNotifications', () => ({ sendPushToUser: jest.fn().mockResolvedValue({}) }));
-jest.mock('../src/utils/geocheck', () => ({ checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }) }));
+jest.mock('../src/utils/geocheck', () => ({
+  checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }),
+  checkCoordinateGeoFence: jest.fn().mockReturnValue({ checked: false, allowed: true, distanceKm: null, reason: null }),
+}));
 jest.mock('../src/utils/idempotency', () => ({
   getCachedResponse: jest.fn().mockReturnValue(null),
   cacheResponse: jest.fn(),
@@ -170,6 +182,10 @@ jest.mock('../src/middleware/requestLogger', () => (req, res, next) => {
 beforeEach(() => {
   jest.resetAllMocks();
   // Re-apply default implementations after reset
+  const geocheck = jest.requireMock('../src/utils/geocheck');
+  geocheck.checkGeoFence.mockResolvedValue({ allowed: true });
+  geocheck.checkCoordinateGeoFence.mockReturnValue({ checked: false, allowed: true, distanceKm: null, reason: null });
+
   const mockDb = jest.requireMock('../src/db/schema');
   mockDb.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
   mockDb.prepare = jest.fn(() => ({
@@ -183,6 +199,10 @@ beforeEach(() => {
       (...args) =>
         fn(...args)
   );
+
+  const idempotency = jest.requireMock('../src/utils/idempotency');
+  idempotency.getCachedResponse.mockResolvedValue(null);
+  idempotency.cacheResponse.mockResolvedValue(undefined);
 
   const stellar = jest.requireMock('../src/utils/stellar');
   if (stellar.createWallet) stellar.createWallet.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
@@ -205,6 +225,9 @@ beforeEach(() => {
   stellar.getTransactions?.mockResolvedValue({ records: [], next_cursor: null, prev_cursor: null });
   stellar.fundTestnetAccount?.mockResolvedValue({});
   stellar.sendPayment?.mockResolvedValue('TXHASH123');
+  stellar.getPlatformFeeInfo?.mockReturnValue({ feePercent: 0, feeAmount: 0, farmerAmount: 10, platformWallet: null });
+  stellar.getMemo?.mockResolvedValue(null);
+  stellar.generatePaymentLink?.mockReturnValue('web+stellar:pay?destination=TEST');
   stellar.isTestnet = true;
   stellar.createClaimableBalance?.mockResolvedValue({
     txHash: 'ESCROW_TX',
@@ -212,10 +235,13 @@ beforeEach(() => {
   });
   stellar.claimBalance?.mockResolvedValue('CLAIM_TX_001');
   stellar.simulateContractCall = jest.fn();
+  stellar.recordCarbonOffset = jest.fn().mockResolvedValue({});
+  stellar.getCarbonOffset = jest.fn();
   stellar.invokeContract = jest.fn();
   stellar.getContractWasmHash = jest.fn().mockResolvedValue('0'.repeat(64));
   stellar.getOrderBook?.mockResolvedValue({ bids: [], asks: [], base: 'XLM', counter: 'USDC' });
   if (stellar.invokeEscrowContract) stellar.invokeEscrowContract.mockResolvedValue({ txHash: 'ESCROW_TX' });
+  if (stellar.mintRewardTokens) stellar.mintRewardTokens.mockResolvedValue({});
   if (stellar.burnRewardTokens) stellar.burnRewardTokens.mockResolvedValue({});
 
   const mailer = jest.requireMock('../src/utils/mailer');
