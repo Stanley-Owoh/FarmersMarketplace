@@ -431,9 +431,11 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   try {
     const { rows: pendingItems } = await db.query(
       `SELECT COUNT(DISTINCT product_id) as cnt FROM orders
-       WHERE buyer_id = $1 AND status = 'pending'
+       WHERE buyer_id = $1
+         AND status IN ('paid', 'processing', 'shipped', 'delivered')
+         AND product_id <> $3
          AND product_id IN (SELECT id FROM products WHERE farmer_id = $2)`,
-      [req.user.id, product.farmer_id]
+      [req.user.id, product.farmer_id, product_id]
     );
     const distinctProducts = parseInt(pendingItems[0]?.cnt || 0, 10) + 1;
     if (distinctProducts >= 2) {
@@ -447,8 +449,8 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
         bundleDiscount = parseFloat(((subtotal - discount) * tiers[0].discount_percent / 100).toFixed(7));
       }
     }
-  } catch {
-    // bundle_discounts table may not exist yet — skip silently
+  } catch (error) {
+    logger.warn('[orders] Bundle discount lookup failed', { error: error.message });
   }
 
   const totalPrice = parseFloat((subtotal - discount - bundleDiscount).toFixed(7));

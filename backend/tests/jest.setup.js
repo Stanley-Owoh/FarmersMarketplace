@@ -77,7 +77,10 @@ jest.mock('../src/utils/stellar', () => ({
 // --- Missing utility mocks ---
 jest.mock('../src/utils/cdn', () => ({ rewriteImageUrl: (url) => url }));
 jest.mock('../src/utils/pushNotifications', () => ({ sendPushToUser: jest.fn().mockResolvedValue({}) }));
-jest.mock('../src/utils/geocheck', () => ({ checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }) }));
+jest.mock('../src/utils/geocheck', () => ({
+  checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }),
+  checkCoordinateGeoFence: jest.fn(() => ({ allowed: true })),
+}));
 jest.mock('../src/utils/idempotency', () => ({
   getCachedResponse: jest.fn().mockReturnValue(null),
   cacheResponse: jest.fn(),

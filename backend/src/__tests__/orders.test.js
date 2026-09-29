@@ -8,6 +8,7 @@ process.env.NODE_ENV = 'test';
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const app = require('../app');
+const { checkGeoFence, checkCoordinateGeoFence } = jest.requireMock('../utils/geocheck');
 
 jest.mock('../middleware/auth', () => {
   const jwt = require('jsonwebtoken');
@@ -29,6 +30,8 @@ const stellar = jest.requireMock('../utils/stellar');
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+  checkGeoFence.mockResolvedValue({ allowed: true });
+  checkCoordinateGeoFence.mockReturnValue({ allowed: true });
 });
 
 const SECRET = process.env.JWT_SECRET;
@@ -87,6 +90,44 @@ describe('POST /api/orders', () => {
     expect(res.body.status).toBe('paid');
     expect(res.body.txHash).toBe('FAKE_TX_HASH_ABC');
     expect(res.body.orderId).toBeDefined();
+  });
+
+  it('calculates bundle discounts from paid sibling products, never unpaid pending orders', async () => {
+    stellar.getBalance.mockResolvedValueOnce(9999);
+    stellar.sendPayment.mockResolvedValueOnce('PAID_WITH_BUNDLE_DISCOUNT');
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [product], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // no volume tiers
+      .mockResolvedValueOnce({ rows: [{ price: 5 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ cnt: '1' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ min_products: 2, discount_percent: 10 }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ quantity: 9 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 42 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [farmer], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ quantity: 9, low_stock_threshold: 5, low_stock_alerted: 0 }],
+        rowCount: 1,
+      });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${jwt.sign({ id: 2, role: 'buyer', email_verified_at: new Date().toISOString() }, SECRET)}`)
+      .set('X-Idempotency-Key', '550e8400-e29b-41d4-a716-446655440099')
+      .send({ product_id: 10, quantity: 1 });
+
+    const eligibilityQuery = mockDb.query.mock.calls.find(([sql]) =>
+      sql.includes('COUNT(DISTINCT product_id)')
+    );
+    expect(eligibilityQuery[0]).toMatch(/status IN \('paid', 'processing', 'shipped', 'delivered'\)/);
+    expect(eligibilityQuery[0]).toContain('product_id <> $3');
+    expect(eligibilityQuery[1]).toEqual([2, 1, 10]);
+    const insertQuery = mockDb.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO orders'));
+    expect(insertQuery[1][3]).toBe(4.5);
   });
 
   it('returns 403 when a farmer tries to place an order', async () => {
