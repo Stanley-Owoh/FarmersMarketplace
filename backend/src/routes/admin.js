@@ -1,12 +1,14 @@
 const router = require('express').Router();
 const db = require('../db/schema');
-const adminAuth = require('../middleware/adminAuth');
 const auth = require('../middleware/auth');
 const requireAdmin = require('../middleware/requireAdmin');
 const { sendPayment } = require('../utils/stellar');
 
+// All /admin routes require an authenticated admin.
+router.use(auth, requireAdmin);
+
 // GET /api/admin/returns - list all return requests
-router.get('/returns', adminAuth, (req, res) => {
+router.get('/returns', (req, res) => {
   const returns = db.prepare(`
     SELECT r.*, o.total_price, o.shipping_cost, o.stellar_tx_hash AS order_tx_hash,
            p.name AS product_name,
@@ -21,7 +23,7 @@ router.get('/returns', adminAuth, (req, res) => {
 });
 
 // POST /api/admin/returns/:id/approve
-router.post('/returns/:id/approve', adminAuth, async (req, res) => {
+router.post('/returns/:id/approve', async (req, res) => {
   const ret = db.prepare(`
     SELECT r.*,
            o.total_price, o.shipping_cost,
@@ -58,7 +60,7 @@ router.post('/returns/:id/approve', adminAuth, async (req, res) => {
 });
 
 // POST /api/admin/returns/:id/reject
-router.post('/returns/:id/reject', adminAuth, (req, res) => {
+router.post('/returns/:id/reject', (req, res) => {
   const ret = db.prepare('SELECT * FROM returns WHERE id = ?').get(req.params.id);
   if (!ret) return res.status(404).json({ error: 'Return request not found' });
   if (ret.status !== 'pending') return res.status(400).json({ error: `Return already ${ret.status}` });
@@ -68,7 +70,7 @@ router.post('/returns/:id/reject', adminAuth, (req, res) => {
 });
 
 // GET /api/admin/users - list users with pagination and filters
-router.get('/users', adminAuth, async (req, res) => {
+router.get('/users', async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.max(1, Math.min(200, parseInt(req.query.limit) || 50));
   const offset = (page - 1) * limit;
@@ -124,7 +126,7 @@ router.get('/users', adminAuth, async (req, res) => {
 });
 
 // GET /api/admin/orders - list orders with pagination
-router.get('/orders', adminAuth, (req, res) => {
+router.get('/orders', (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
   
@@ -166,7 +168,7 @@ router.get('/orders', adminAuth, (req, res) => {
 });
 
 // DELETE /api/admin/users/:id - deactivate user
-router.delete('/users/:id', adminAuth, (req, res) => {
+router.delete('/users/:id', (req, res) => {
   const userId = req.params.id;
   
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
@@ -178,7 +180,7 @@ router.delete('/users/:id', adminAuth, (req, res) => {
 });
 
 // GET /api/admin/stats - dashboard statistics
-router.get('/stats', adminAuth, (req, res) => {
+router.get('/stats', (req, res) => {
   const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
   const totalProducts = db.prepare('SELECT COUNT(*) as count FROM products').get().count;
   const totalOrders = db.prepare('SELECT COUNT(*) as count FROM orders').get().count;
@@ -193,7 +195,7 @@ router.get('/stats', adminAuth, (req, res) => {
 });
 
 // GET /api/admin/analytics/summary - last-30-day platform metrics
-router.get('/analytics/summary', adminAuth, (req, res) => {
+router.get('/analytics/summary', (req, res) => {
   const gmv = db.prepare(`
     SELECT
       ROUND(SUM(total_price), 7)                                             AS total,
@@ -228,95 +230,7 @@ router.get('/analytics/summary', adminAuth, (req, res) => {
     LIMIT 5
   `).all();
 
-  // Daily active users: distinct buyers + farmers touched by orders each day
-  const dailyActiveUsers = db.prepare(`
-    SELECT day, COUNT(DISTINCT user_id) AS active_users
-    FROM (
-      SELECT date(o.created_at) AS day, o.buyer_id AS user_id
-      FROM orders o
-      WHERE o.created_at >= datetime('now', '-30 days')
-      UNION ALL
-      SELECT date(o.created_at) AS day, p.farmer_id AS user_id
-      FROM orders o
-      JOIN products p ON o.product_id = p.id
-      WHERE o.created_at >= datetime('now', '-30 days')
-    )
-    GROUP BY day
-    ORDER BY day ASC
-  `).all();
-
-  const dailyGmv = db.prepare(`
-    SELECT date(created_at) AS day, ROUND(SUM(total_price), 7) AS gmv, COUNT(*) AS orders
-    FROM orders
-    WHERE status = 'paid'
-      AND created_at >= datetime('now', '-30 days')
-    GROUP BY date(created_at)
-    ORDER BY day ASC
-  `).all();
-
-  res.json({
-    period: 'last_30_days',
-    gmv,
-    conversion: conversion.total_orders ? conversion : { total_orders: 0, paid_orders: 0, rate_pct: 0 },
-    top_products: topProducts,
-    daily_active_users: dailyActiveUsers,
-    daily_gmv: dailyGmv,
-  });
-});
-
-// GET /api/admin/failed-emails
-router.get('/failed-emails', adminAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM failed_emails ORDER BY created_at DESC').all();
-  res.json({ success: true, data: rows });
-});
-
-// GET /api/admin/analytics/creator-earnings — Issue #998
-// Platform-wide Creator Earnings totals + a daily time-series breakdown,
-// aggregated from the creator_earnings_ledger table populated by
-// jobs/creatorEarningsMonitor.js.
-router.get('/analytics/creator-earnings', auth, requireAdmin, async (req, res) => {
-  const { rows: totalsRows } = await db.query(
-    `SELECT
-       COALESCE(SUM(CASE WHEN event_type = 'credit' THEN amount ELSE 0 END), 0) AS total_credited,
-       COALESCE(SUM(CASE WHEN event_type = 'claim'  THEN amount ELSE 0 END), 0) AS total_claimed,
-       COALESCE(SUM(CASE WHEN event_type = 'credit' THEN fee_amount ELSE 0 END), 0) AS total_platform_fee
-     FROM creator_earnings_ledger`
-  );
-
-  const dayExpr = db.isPostgres ? `TO_CHAR(created_at, 'YYYY-MM-DD')` : `date(created_at)`;
-  const { rows: seriesRows } = await db.query(
-    `SELECT ${dayExpr} AS day,
-            event_type,
-            COALESCE(SUM(amount), 0) AS amount,
-            COALESCE(SUM(fee_amount), 0) AS fee_amount
-     FROM creator_earnings_ledger
-     GROUP BY ${dayExpr}, event_type
-     ORDER BY day ASC`
-  );
-
-  const byDay = new Map();
-  for (const row of seriesRows) {
-    if (!byDay.has(row.day)) {
-      byDay.set(row.day, { day: row.day, credited: 0, claimed: 0, platform_fee: 0 });
-    }
-    const bucket = byDay.get(row.day);
-    if (row.event_type === 'credit') {
-      bucket.credited += Number(row.amount);
-      bucket.platform_fee += Number(row.fee_amount);
-    } else if (row.event_type === 'claim') {
-      bucket.claimed += Number(row.amount);
-    }
-  }
-
-  res.json({
-    success: true,
-    data: {
-      total_credited_xlm: Number(totalsRows[0].total_credited),
-      total_claimed_xlm: Number(totalsRows[0].total_claimed),
-      total_platform_fee_xlm: Number(totalsRows[0].total_platform_fee),
-      time_series: [...byDay.values()],
-    },
-  });
+  res.json({ gmv, conversion, topProducts });
 });
 
 module.exports = router;
