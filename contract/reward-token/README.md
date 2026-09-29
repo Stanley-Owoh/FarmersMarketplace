@@ -39,3 +39,9 @@ REWARD_TOKEN_ADMIN_SECRET=<admin_secret_key>
 ## Usage
 
 Tokens are automatically minted to buyers after successful purchases (1 FRT per 1 XLM spent).
+
+Balance entries refresh their persistent-storage TTL whenever a balance changes,
+so active balances are not archived simply because they were written without a
+TTL bump. Balances that were already archived before this behavior was deployed
+must be restored through Soroban's archived-entry restoration flow before they
+can be read or changed.

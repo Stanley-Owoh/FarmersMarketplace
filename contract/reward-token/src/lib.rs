@@ -118,11 +118,23 @@ impl RewardToken {
     // TTL buffer added on top of the vesting period when extending vesting entry TTL.
     const fn vesting_ttl_buffer() -> u32 { 10_000 }
 
+    // Refresh balance entries well before they can be archived.
+    const BALANCE_TTL_THRESHOLD: u32 = 100_000;
+    const BALANCE_TTL_BUMP: u32 = 500_000;
+
     // Bounds (in ledgers, ~5s each) for an allowance's persistent storage TTL,
     // independent of the network's own extend_ttl limits: never let a short-lived
     // allowance get archived within an hour, and never ask for more than ~180 days.
     const MIN_ALLOWANCE_TTL: u32 = 720;
     const MAX_ALLOWANCE_TTL: u32 = 3_110_400;
+
+    fn set_balance(env: &Env, id: &Address, amount: i128) {
+        let key = DataKey::Balance(id.clone());
+        env.storage().persistent().set(&key, &amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, Self::BALANCE_TTL_THRESHOLD, Self::BALANCE_TTL_BUMP);
+    }
 
     /// Sets the burn-on-transfer fee in basis points (#685).
     /// 0 = disabled, 100 = 1%, 10000 = 100% (max).
@@ -189,7 +201,7 @@ impl RewardToken {
         }
 
         let balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to.clone()), &(balance + amount));
+        Self::set_balance(&env, &to, balance + amount);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
         env.events().publish(("mint", to.clone()), amount);
     }
@@ -212,7 +224,7 @@ impl RewardToken {
         }
 
         let balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to.clone()), &(balance + amount));
+        Self::set_balance(&env, &to, balance + amount);
 
         // #693 — record a vesting lock if a vesting period is configured.
         let vesting_period: u32 = env
@@ -298,7 +310,7 @@ impl RewardToken {
         let balance = Self::balance(env.clone(), from.clone());
         let actual = if amount > balance { balance } else { amount };
         if actual > 0 {
-            env.storage().persistent().set(&DataKey::Balance(from.clone()), &(balance - actual));
+            Self::set_balance(env, from, balance - actual);
             let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
             env.storage().instance().set(&DataKey::TotalSupply, &(supply - actual));
         }
@@ -377,7 +389,7 @@ impl RewardToken {
         }
 
         // Burn the tokens
-        env.storage().persistent().set(&DataKey::Balance(buyer.clone()), &(balance - token_amount));
+        Self::set_balance(&env, &buyer, balance - token_amount);
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply - token_amount));
 
@@ -404,7 +416,7 @@ impl RewardToken {
         }
 
         let balance = Self::balance(env.clone(), buyer.clone());
-        env.storage().persistent().set(&DataKey::Balance(buyer.clone()), &(balance + token_amount));
+        Self::set_balance(&env, &buyer, balance + token_amount);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply + token_amount));
         env.events().publish(("reward", "reissued", buyer, order_id), token_amount);
     }
@@ -432,7 +444,7 @@ impl RewardToken {
             amount: val.amount - amount,
             expiration_ledger: val.expiration_ledger,
         });
-        env.storage().persistent().set(&DataKey::Balance(from.clone()), &(balance - amount));
+        Self::set_balance(&env, &from, balance - amount);
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
         env.events().publish(("burn_from", spender, from), amount);
@@ -457,10 +469,10 @@ impl RewardToken {
         let burn_amount: i128 = if fee_bps > 0 { Self::compute_fee(amount, fee_bps) } else { 0 };
         let net_amount = amount - burn_amount;
 
-        env.storage().persistent().set(&DataKey::Balance(from.clone()), &(from_balance - amount));
+        Self::set_balance(&env, &from, from_balance - amount);
 
         let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to.clone()), &(to_balance + net_amount));
+        Self::set_balance(&env, &to, to_balance + net_amount);
 
         if burn_amount > 0 {
             let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
@@ -500,14 +512,10 @@ impl RewardToken {
         let burn_amount: i128 = if fee_bps > 0 { Self::compute_fee(amount, fee_bps) } else { 0 };
         let net_amount = amount - burn_amount;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from.clone()), &(from_balance - amount));
+        Self::set_balance(&env, &from, from_balance - amount);
 
         let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to.clone()), &(to_balance + net_amount));
+        Self::set_balance(&env, &to, to_balance + net_amount);
 
         if burn_amount > 0 {
             let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
@@ -544,12 +552,8 @@ impl RewardToken {
         let from_balance = Self::balance(env.clone(), from.clone());
         let to_balance = Self::balance(env.clone(), to.clone());
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from.clone()), &(from_balance - amount));
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to.clone()), &(to_balance + amount));
+        Self::set_balance(&env, &from, from_balance - amount);
+        Self::set_balance(&env, &to, to_balance + amount);
 
         env.events().publish(("transfer_vested", from, to), amount);
     }
@@ -727,6 +731,33 @@ mod test {
         client.burn(&user, &30);
         assert_eq!(client.total_supply(), 70);
         assert_eq!(client.balance(&user), 70);
+    }
+
+    #[test]
+    fn balance_writes_extend_persistent_ttl() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RewardToken);
+        let client = RewardTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let minter = Address::generate(&env);
+        let user = Address::generate(&env);
+        client.initialize(
+            &admin,
+            &minter,
+            &7,
+            &String::from_str(&env, "Farmers Reward"),
+            &String::from_str(&env, "FRT"),
+            &0,
+        );
+        env.mock_auths(&[&minter]);
+        client.mint(&user, &100);
+
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Balance(user.clone()))
+        });
+        assert!(ttl >= RewardToken::BALANCE_TTL_BUMP);
     }
 
     #[test]
