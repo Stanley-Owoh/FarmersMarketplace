@@ -22,7 +22,6 @@ const { errorHandler } = require('./middleware/error');
 const { notFoundHandler } = require('./middleware/error');
 const { sanitizeResponse } = require('./middleware/sanitize');
 const requestLogger = require('./middleware/requestLogger');
-const categoriesRouter = require('./routes/categories');
 
 const app = express();
 
@@ -100,7 +99,8 @@ app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/video
 app.get('/api/csrf-token', csrfTokenHandler);
 // #836: Also expose at /api/auth/csrf-token for SPA initialization (duplicated for discoverability).
 app.get('/api/auth/csrf-token', csrfTokenHandler);
-app.use('/api/categories', categoriesRouter);
+// #1357: categories is mounted only through registerRoute in ./routes so it
+// goes through the same rate limiter and CSRF ordering as every other router.
 
 // Interactive API documentation
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
