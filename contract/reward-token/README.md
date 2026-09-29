@@ -45,3 +45,7 @@ so active balances are not archived simply because they were written without a
 TTL bump. Balances that were already archived before this behavior was deployed
 must be restored through Soroban's archived-entry restoration flow before they
 can be read or changed.
+
+Redemptions are tracked per buyer and order. A buyer can redeem once for an
+order, and an admin refund reissue must restore the exact redeemed amount once;
+the on-chain redemption record is kept alive for roughly 289 days.

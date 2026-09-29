@@ -47,6 +47,8 @@ pub enum DataKey {
     Minter,
     /// Maximum redemption percentage per order in basis points (e.g. 2000 = 20%). (#879)
     MaxRedemptionBps,
+    /// Redemption accounting by buyer and order id.
+    Redemption(Address, u64),
 }
 
 /// A single vesting lock created at mint time (#693).
@@ -57,6 +59,13 @@ pub struct VestingEntry {
     pub locked_amount: i128,
     /// Ledger sequence number at which the tokens become transferable.
     pub unlock_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Redemption {
+    pub token_amount: i128,
+    pub reissued: bool,
 }
 
 #[contracttype]
@@ -121,6 +130,8 @@ impl RewardToken {
     // Refresh balance entries well before they can be archived.
     const BALANCE_TTL_THRESHOLD: u32 = 100_000;
     const BALANCE_TTL_BUMP: u32 = 500_000;
+    const REDEMPTION_TTL_THRESHOLD: u32 = 100_000;
+    const REDEMPTION_TTL_BUMP: u32 = 5_000_000;
 
     // Bounds (in ledgers, ~5s each) for an allowance's persistent storage TTL,
     // independent of the network's own extend_ttl limits: never let a short-lived
@@ -134,6 +145,16 @@ impl RewardToken {
         env.storage()
             .persistent()
             .extend_ttl(&key, Self::BALANCE_TTL_THRESHOLD, Self::BALANCE_TTL_BUMP);
+    }
+
+    fn set_redemption(env: &Env, buyer: &Address, order_id: u64, redemption: &Redemption) {
+        let key = DataKey::Redemption(buyer.clone(), order_id);
+        env.storage().persistent().set(&key, redemption);
+        env.storage().persistent().extend_ttl(
+            &key,
+            Self::REDEMPTION_TTL_THRESHOLD,
+            Self::REDEMPTION_TTL_BUMP,
+        );
     }
 
     /// Sets the burn-on-transfer fee in basis points (#685).
@@ -382,6 +403,10 @@ impl RewardToken {
         if token_amount <= 0 {
             panic!("token_amount must be positive");
         }
+        let key = DataKey::Redemption(buyer.clone(), order_id);
+        if env.storage().persistent().has(&key) {
+            panic!("order already redeemed by buyer");
+        }
 
         let balance = Self::balance(env.clone(), buyer.clone());
         if balance < token_amount {
@@ -392,6 +417,15 @@ impl RewardToken {
         Self::set_balance(&env, &buyer, balance - token_amount);
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply - token_amount));
+        Self::set_redemption(
+            &env,
+            &buyer,
+            order_id,
+            &Redemption {
+                token_amount,
+                reissued: false,
+            },
+        );
 
         // Emit redemption event for backend verification
         env.events().publish(
@@ -408,6 +442,18 @@ impl RewardToken {
         if token_amount <= 0 {
             panic!("token_amount must be positive");
         }
+        let key = DataKey::Redemption(buyer.clone(), order_id);
+        let mut redemption: Redemption = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("redemption not found");
+        if redemption.reissued {
+            panic!("redemption already reissued");
+        }
+        if token_amount != redemption.token_amount {
+            panic!("reissue amount must match redeemed amount");
+        }
 
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
@@ -418,6 +464,8 @@ impl RewardToken {
         let balance = Self::balance(env.clone(), buyer.clone());
         Self::set_balance(&env, &buyer, balance + token_amount);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply + token_amount));
+        redemption.reissued = true;
+        Self::set_redemption(&env, &buyer, order_id, &redemption);
         env.events().publish(("reward", "reissued", buyer, order_id), token_amount);
     }
 
@@ -769,6 +817,73 @@ mod test {
         client.mint(&buyer, &1_000);
         client.redeem(&buyer, &42, &300); // 30% of a hypothetical 1,000-value order.
         assert_eq!(client.balance(&buyer), 700); // Backend must not apply this event as a discount.
+    }
+
+    #[test]
+    fn redemption_can_be_reissued_once_for_the_exact_burned_amount() {
+        let env = Env::default();
+        let (client, admin, minter) = setup_token(&env);
+        let buyer = Address::generate(&env);
+        env.mock_auths(&[&minter, &buyer, &admin]);
+
+        client.mint(&buyer, &1_000);
+        client.redeem(&buyer, &42, &300);
+        assert_eq!(client.total_supply(), 700);
+        client.reissue_redeemed(&buyer, &42, &300);
+
+        assert_eq!(client.balance(&buyer), 1_000);
+        assert_eq!(client.total_supply(), 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "order already redeemed by buyer")]
+    fn buyer_cannot_redeem_same_order_twice() {
+        let env = Env::default();
+        let (client, _admin, minter) = setup_token(&env);
+        let buyer = Address::generate(&env);
+        env.mock_auths(&[&minter, &buyer]);
+
+        client.mint(&buyer, &1_000);
+        client.redeem(&buyer, &42, &300);
+        client.redeem(&buyer, &42, &200);
+    }
+
+    #[test]
+    #[should_panic(expected = "redemption not found")]
+    fn cannot_reissue_unredeemed_order() {
+        let env = Env::default();
+        let (client, admin, _minter) = setup_token(&env);
+        let buyer = Address::generate(&env);
+        env.mock_auths(&[&admin]);
+
+        client.reissue_redeemed(&buyer, &42, &100);
+    }
+
+    #[test]
+    #[should_panic(expected = "reissue amount must match redeemed amount")]
+    fn cannot_reissue_more_than_was_redeemed() {
+        let env = Env::default();
+        let (client, admin, minter) = setup_token(&env);
+        let buyer = Address::generate(&env);
+        env.mock_auths(&[&minter, &buyer, &admin]);
+
+        client.mint(&buyer, &1_000);
+        client.redeem(&buyer, &42, &300);
+        client.reissue_redeemed(&buyer, &42, &301);
+    }
+
+    #[test]
+    #[should_panic(expected = "redemption already reissued")]
+    fn cannot_reissue_same_redemption_twice() {
+        let env = Env::default();
+        let (client, admin, minter) = setup_token(&env);
+        let buyer = Address::generate(&env);
+        env.mock_auths(&[&minter, &buyer, &admin]);
+
+        client.mint(&buyer, &1_000);
+        client.redeem(&buyer, &42, &300);
+        client.reissue_redeemed(&buyer, &42, &300);
+        client.reissue_redeemed(&buyer, &42, &300);
     }
 
     #[test]
