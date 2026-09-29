@@ -40,7 +40,7 @@ const { err } = require('../middleware/error');
 const { getCachedResponse, cacheResponse } = require('../utils/idempotency');
 const { getTierPrice } = require('./coupons');
 const { checkGeoFence, checkCoordinateGeoFence } = require('../utils/geocheck');
-const { broadcastStockUpdate } = require('./products');
+const { broadcastStockUpdate } = require('../utils/stockUpdates');
 const { couponNowExpression } = require('../utils/couponTime');
 
 // XLM per kg per km
@@ -78,6 +78,14 @@ function isFlashSaleActive(product) {
 async function getEffectiveUnitPrice(product, productId, quantity) {
   if (isFlashSaleActive(product)) return Number(product.flash_sale_price);
   return getTierPrice(productId, quantity);
+}
+
+async function restoreProductStock(productId, quantity) {
+  const { rows } = await db.query(
+    'UPDATE products SET quantity = quantity + $1 WHERE id = $2 RETURNING quantity',
+    [quantity, productId]
+  );
+  if (rows[0]) broadcastStockUpdate(productId, rows[0].quantity);
 }
 
 // GET /api/orders/fee-preview
@@ -336,6 +344,30 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   );
   const product = prodRows[0];
   if (!product) return err(res, 404, 'Product not found', 'not_found');
+  if (String(product.farmer_id) === String(req.user.id))
+    return err(res, 403, 'You cannot order your own product', 'self_purchase_not_allowed');
+  if (product.active === false || product.active === 0)
+    return err(res, 404, 'Product is not active', 'product_unavailable');
+
+  const now = Date.now();
+  if (product.best_before && String(product.best_before).slice(0, 10) < new Date(now).toISOString().slice(0, 10))
+    return err(res, 410, 'Product has expired', 'product_expired');
+  if (product.available_from) {
+    const availableFrom = new Date(product.available_from).getTime();
+    if (Number.isNaN(availableFrom))
+      return err(res, 409, 'Product availability schedule is invalid', 'invalid_product_schedule');
+    if (availableFrom > now)
+      return err(res, 422, 'Product is not available yet', 'product_not_yet_available');
+  }
+  if (product.available_until) {
+    const availableUntil = new Date(product.available_until).getTime();
+    if (Number.isNaN(availableUntil))
+      return err(res, 409, 'Product availability schedule is invalid', 'invalid_product_schedule');
+    if (availableUntil < now)
+      return err(res, 410, 'Product availability period has ended', 'product_unavailable');
+  }
+  if (Number(product.quantity) < quantity)
+    return err(res, 409, 'Insufficient stock for this product', 'out_of_stock');
 
   // Flash sale timing — server time is the source of truth
   if (product.flash_sale_price && product.flash_sale_ends_at) {
@@ -431,9 +463,11 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   try {
     const { rows: pendingItems } = await db.query(
       `SELECT COUNT(DISTINCT product_id) as cnt FROM orders
-       WHERE buyer_id = $1 AND status = 'pending'
+       WHERE buyer_id = $1
+         AND status IN ('paid', 'processing', 'shipped', 'delivered')
+         AND product_id <> $3
          AND product_id IN (SELECT id FROM products WHERE farmer_id = $2)`,
-      [req.user.id, product.farmer_id]
+      [req.user.id, product.farmer_id, product_id]
     );
     const distinctProducts = parseInt(pendingItems[0]?.cnt || 0, 10) + 1;
     if (distinctProducts >= 2) {
@@ -447,8 +481,8 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
         bundleDiscount = parseFloat(((subtotal - discount) * tiers[0].discount_percent / 100).toFixed(7));
       }
     }
-  } catch {
-    // bundle_discounts table may not exist yet — skip silently
+  } catch (error) {
+    logger.warn('[orders] Bundle discount lookup failed', { error: error.message });
   }
 
   const totalPrice = parseFloat((subtotal - discount - bundleDiscount).toFixed(7));
@@ -484,21 +518,80 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
       return res.status(402).json({ success: false, message: 'Insufficient XLM balance', code: 'insufficient_balance' });
   }
 
-  const { rows: orderRows } = await db.query(
-    `INSERT INTO orders (buyer_id, product_id, quantity, total_price, custom_price, status, address_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-    [req.user.id, product_id, quantity, totalPrice, custom_price || null, 'pending', address_id || null]
+  const { rows: reservedRows, rowCount: stockReserved } = await db.query(
+    `UPDATE products
+     SET quantity = quantity - $1
+     WHERE id = $2
+       AND quantity >= $1
+       AND active = true
+       AND (available_from IS NULL OR available_from <= CURRENT_TIMESTAMP)
+       AND (available_until IS NULL OR available_until >= CURRENT_TIMESTAMP)
+       AND (best_before IS NULL OR best_before >= CURRENT_DATE)
+     RETURNING quantity`,
+    [quantity, product_id]
   );
+  if (!stockReserved) return err(res, 409, 'Insufficient stock or product no longer available', 'out_of_stock');
+  if (reservedRows[0]) broadcastStockUpdate(product_id, reservedRows[0].quantity);
+
+  let orderRows;
+  try {
+    ({ rows: orderRows } = await db.query(
+      `INSERT INTO orders (buyer_id, product_id, quantity, total_price, custom_price, status, address_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [req.user.id, product_id, quantity, totalPrice, custom_price || null, 'pending', address_id || null]
+    ));
+  } catch (error) {
+    try {
+      await restoreProductStock(product_id, quantity);
+    } catch (restoreError) {
+      logger.error('[orders] Failed to restore stock after order insert failure', {
+        productId: product_id,
+        error: restoreError.message,
+      });
+    }
+    logger.error('[orders] Failed to create order after stock reservation', { error: error.message });
+    return err(res, 500, 'Unable to create order', 'order_creation_failed');
+  }
   const orderId = orderRows[0].id;
 
   // SEP-0007 wallet flow — return payment link without processing
   if (req.body.payment_method === 'sep7') {
+    const memo = `order:${orderId}`;
+    try {
+      await db.query('UPDATE orders SET stellar_memo = $1 WHERE id = $2', [memo, orderId]);
+    } catch (error) {
+      await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
+      try {
+        await restoreProductStock(product_id, quantity);
+      } catch (restoreError) {
+        logger.error('[orders] Failed to restore stock after SEP-0007 setup failure', {
+          productId: product_id,
+          error: restoreError.message,
+        });
+      }
+      logger.error('[orders] Failed to persist SEP-0007 payment memo', { error: error.message });
+      return err(res, 500, 'Unable to create payment link', 'payment_link_creation_failed');
+    }
     if (appliedCoupon) {
       await db.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [appliedCoupon.id]);
       await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
-    const responseData = { success: true, orderId, status: 'pending', totalPrice, message: 'Order created for SEP-0007 payment' };
-    if (idempotencyKey) cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
+    const paymentLink = generatePaymentLink({
+      destination: product.farmer_wallet,
+      amount: String(totalPrice),
+      assetCode: 'XLM',
+      assetIssuer: '',
+      memo,
+    });
+    const responseData = {
+      success: true,
+      orderId,
+      status: 'pending',
+      totalPrice,
+      paymentLink,
+      message: 'Order created for SEP-0007 payment',
+    };
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
     return res.json(responseData);
   }
 
@@ -632,8 +725,6 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
       sendLowStockAlert({ product: { ...product, quantity: updated.quantity }, farmer })
         .catch((e) => logger.error('Low-stock alert failed:', { error: e.message }));
     }
-    if (updated) broadcastStockUpdate(product_id, updated.quantity);
-
     const rewardAmount = Math.floor(totalPrice);
     if (rewardAmount > 0 && buyer.stellar_public_key) {
       try {
@@ -667,14 +758,15 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     if (usePathPayment) {
       // Path payment orders must not be persisted on failure — delete the pending row
       await db.query('DELETE FROM orders WHERE id = $1', [orderId]);
-      await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
+      await restoreProductStock(product_id, quantity);
       return res.status(402).json({ success: false, code: 'no_payment_path', message: e.message || 'Path payment could not be completed' });
     }
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
-    await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
+    await restoreProductStock(product_id, quantity);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -941,6 +1033,9 @@ router.get('/:id/payment-link', auth, async (req, res) => {
   if (!order) return err(res, 404, 'Order not found', 'not_found');
   if (order.buyer_id !== req.user.id && req.user.role !== 'admin')
     return err(res, 403, 'Forbidden', 'forbidden');
+  if (order.status !== 'pending') return err(res, 409, 'Order is no longer awaiting payment', 'invalid_order_state');
+  if (Date.now() - new Date(order.created_at).getTime() >= 30 * 60 * 1000)
+    return err(res, 410, 'Payment link has expired', 'payment_link_expired');
 
   const link = generatePaymentLink({
     destination: order.farmer_public_key,
@@ -949,7 +1044,12 @@ router.get('/:id/payment-link', auth, async (req, res) => {
     assetIssuer: '',
     memo: `order:${order.id}`,
   });
-  res.json({ success: true, paymentLink: link, orderId: order.id });
+  res.json({
+    success: true,
+    paymentLink: link,
+    orderId: order.id,
+    expiresAt: new Date(new Date(order.created_at).getTime() + 30 * 60 * 1000).toISOString(),
+  });
 });
 
 // SSE clients map: userId -> Set of response objects

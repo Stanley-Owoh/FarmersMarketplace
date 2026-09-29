@@ -12,9 +12,6 @@ if (!['testnet', 'mainnet'].includes(STELLAR_NETWORK)) {
 
 const isTestnet = STELLAR_NETWORK === 'testnet';
 
-const horizonUrl =
-  process.env.STELLAR_HORIZON_URL ||
-  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
 if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== 'true') {
   throw new Error(
     'Mainnet use requires STELLAR_MAINNET_CONFIRMED=true in your environment. ' +
@@ -22,7 +19,9 @@ if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== '
   );
 }
 
-const isTestnet = STELLAR_NETWORK === 'testnet';
+const horizonUrl =
+  process.env.STELLAR_HORIZON_URL ||
+  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
 
 const sorobanRpcUrl =
   process.env.SOROBAN_RPC_URL ||
@@ -30,23 +29,7 @@ const sorobanRpcUrl =
 
 const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.Networks.PUBLIC;
 const server = new StellarSdk.Horizon.Server(horizonUrl);
-
-module.exports = {
-  StellarSdk,
-  STELLAR_NETWORK,
-  isTestnet,
-  horizonUrl,
-  sorobanRpcUrl,
-  networkPassphrase,
-  server,
 const sorobanServer = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
-
-const horizonUrl =
-  process.env.STELLAR_HORIZON_URL ||
-  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
-
-const server = new StellarSdk.Horizon.Server(horizonUrl);
-const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.Networks.PUBLIC;
 
 // Required Soroban/escrow environment variables. Missing values cause cryptic
 // runtime failures at the contract call site, so we validate them at startup.
@@ -102,7 +85,10 @@ function validateStellarConfig() {
 
 module.exports = {
   StellarSdk,
+  STELLAR_NETWORK,
   isTestnet,
+  horizonUrl,
+  sorobanRpcUrl,
   server,
   sorobanServer,
   networkPassphrase,

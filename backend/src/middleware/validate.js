@@ -113,6 +113,7 @@ module.exports = {
       .optional(),
     address_id: z.coerce.number().int().positive().optional(),
     use_soroban_escrow: z.coerce.boolean().optional(),
+    payment_method: z.enum(['sep7']).optional(),
     weight: z.coerce.number().positive('weight must be a positive number').optional(),
     custom_price: z.coerce.number().positive('custom_price must be a positive number').optional(),
     coupon_code: z.string().optional(),

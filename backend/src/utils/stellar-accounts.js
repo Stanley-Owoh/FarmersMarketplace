@@ -44,11 +44,8 @@ function decryptAndDeriveKeypair(encryptedSeedPhrase) {
   }
 }
 
-module.exports = { decryptAndDeriveKeypair };
 const config = require('../config');
-const bip39 = require('bip39');
-const StellarHDWallet = require('stellar-hd-wallet');
-const { StellarSdk, isTestnet, server, networkPassphrase } = require('./stellar-config');
+const { isTestnet, server, networkPassphrase } = require('./stellar-config');
 
 // In-memory cache: publicKey -> { federationAddress, expiresAt }
 const _federationCache = new Map();
@@ -281,6 +278,7 @@ async function resolveFederationAddress(address, db) {
 
 module.exports = {
   FederationError,
+  decryptAndDeriveKeypair,
   createWallet,
   createWalletFromMnemonic,
   deriveKeypairFromMnemonic,
