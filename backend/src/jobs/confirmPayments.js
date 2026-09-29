@@ -1,55 +1,96 @@
 const db = require('../db/schema');
-const { getTransactions } = require('../utils/stellar');
+const { findIncomingPaymentsByMemo } = require('../utils/stellar');
 const logger = require('../logger');
 
-const POLL_INTERVAL_MS = 5000;
-const TIMEOUT_MS = 60000;
+const POLL_INTERVAL_MS = 15000;
 
 async function confirmPendingOrders() {
-  const { rows: confirming } = await db.query(
-    `SELECT o.*, u.stellar_public_key
-     FROM orders o JOIN users u ON o.buyer_id = u.id
-     WHERE o.status = 'confirming' AND o.stellar_tx_hash IS NOT NULL`
+  const { rows: pendingOrders } = await db.query(
+    `SELECT o.id, o.total_price, o.stellar_memo, p.farmer_id,
+            u.stellar_public_key AS farmer_public_key
+     FROM orders o
+     JOIN products p ON p.id = o.product_id
+     JOIN users u ON u.id = p.farmer_id
+     WHERE o.status = 'pending'
+       AND o.stellar_memo IS NOT NULL
+       AND o.stellar_memo LIKE 'order:%'`
   );
 
-  for (const order of confirming) {
-    const submittedAt = new Date(order.tx_submitted_at).getTime();
-    if (Date.now() - submittedAt > TIMEOUT_MS) {
-      await db.query(`UPDATE orders SET status = 'failed' WHERE id = $1`, [order.id]);
-      await db.query(`UPDATE products SET quantity = quantity + $1 WHERE id = $2`, [
-        order.quantity,
-        order.product_id
-      ]);
-      console.log(`[confirm] Order ${order.id} timed out`);
+  const ordersByFarmer = new Map();
+  for (const order of pendingOrders) {
+    if (!order.farmer_public_key) {
+      logger.warn('[confirm] SEP-0007 order has no farmer wallet', { orderId: order.id });
+      continue;
+    }
+    const orders = ordersByFarmer.get(order.farmer_public_key) || [];
+    orders.push(order);
+    ordersByFarmer.set(order.farmer_public_key, orders);
+  }
+
+  for (const [farmerPublicKey, orders] of ordersByFarmer) {
+    let payments;
+    try {
+      payments = await findIncomingPaymentsByMemo(
+        farmerPublicKey,
+        orders.map((order) => ({
+          memo: order.stellar_memo,
+          amount: order.total_price,
+        }))
       );
-      logger.info(`[confirm] Order ${order.id} timed out`);
+    } catch (error) {
+      logger.error('[confirm] Failed to check Horizon payments', {
+        farmerPublicKey,
+        error: error.message,
+      });
       continue;
     }
 
-    try {
-      const txs = await getTransactions(order.stellar_public_key);
-      const confirmed = txs.some((tx) => tx.hash === order.stellar_tx_hash);
-      if (confirmed) {
-        await db.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [order.id]);
-        console.log(`[confirm] Order ${order.id} confirmed — TX ${order.stellar_tx_hash}`);
-        db.prepare(`UPDATE orders SET status = 'paid' WHERE id = ?`).run(order.id);
-        logger.info(`[confirm] Order ${order.id} confirmed — TX ${order.stellar_tx_hash}`);
+    for (const order of orders) {
+      const txHash = payments.get(order.stellar_memo);
+      if (!txHash) continue;
+
+      try {
+        const { rowCount } = await db.query(
+          `UPDATE orders
+           SET status = 'paid', stellar_tx_hash = $1
+           WHERE id = $2 AND status = 'pending' AND stellar_memo = $3`,
+          [txHash, order.id, order.stellar_memo]
+        );
+        if (rowCount > 0) {
+          logger.info('[confirm] SEP-0007 order payment confirmed', {
+            orderId: order.id,
+            txHash,
+          });
+        }
+      } catch (error) {
+        logger.error('[confirm] Failed to update paid order', {
+          orderId: order.id,
+          error: error.message,
+        });
       }
-    } catch (e) {
-      logger.error(`[confirm] Error checking order ${order.id}`, { error: e.message });
     }
   }
 }
 
+let running = false;
+
 function start() {
-  setInterval(() => {
-    confirmPendingOrders().catch((error) => {
-      console.error('[confirm] Scheduled job failed:', error);
-    });
-  }, POLL_INTERVAL_MS);
-  console.log('[confirm] Payment confirmation job started');
-  setInterval(confirmPendingOrders, POLL_INTERVAL_MS);
-  logger.info('[confirm] Payment confirmation job started');
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await confirmPendingOrders();
+    } catch (error) {
+      logger.error('[confirm] Scheduled job failed', { error: error.message });
+    } finally {
+      running = false;
+    }
+  };
+
+  void run();
+  const timer = setInterval(run, POLL_INTERVAL_MS);
+  logger.info('[confirm] SEP-0007 payment confirmation job started');
+  return timer;
 }
 
 module.exports = { start, confirmPendingOrders };

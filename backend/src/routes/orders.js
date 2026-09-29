@@ -493,12 +493,28 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
 
   // SEP-0007 wallet flow — return payment link without processing
   if (req.body.payment_method === 'sep7') {
+    const memo = `order:${orderId}`;
+    await db.query('UPDATE orders SET stellar_memo = $1 WHERE id = $2', [memo, orderId]);
     if (appliedCoupon) {
       await db.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [appliedCoupon.id]);
       await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
-    const responseData = { success: true, orderId, status: 'pending', totalPrice, message: 'Order created for SEP-0007 payment' };
-    if (idempotencyKey) cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
+    const paymentLink = generatePaymentLink({
+      destination: product.farmer_wallet,
+      amount: String(totalPrice),
+      assetCode: 'XLM',
+      assetIssuer: '',
+      memo,
+    });
+    const responseData = {
+      success: true,
+      orderId,
+      status: 'pending',
+      totalPrice,
+      paymentLink,
+      message: 'Order created for SEP-0007 payment',
+    };
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
     return res.json(responseData);
   }
 
@@ -673,8 +689,9 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -941,6 +958,9 @@ router.get('/:id/payment-link', auth, async (req, res) => {
   if (!order) return err(res, 404, 'Order not found', 'not_found');
   if (order.buyer_id !== req.user.id && req.user.role !== 'admin')
     return err(res, 403, 'Forbidden', 'forbidden');
+  if (order.status !== 'pending') return err(res, 409, 'Order is no longer awaiting payment', 'invalid_order_state');
+  if (Date.now() - new Date(order.created_at).getTime() >= 30 * 60 * 1000)
+    return err(res, 410, 'Payment link has expired', 'payment_link_expired');
 
   const link = generatePaymentLink({
     destination: order.farmer_public_key,
@@ -949,7 +969,12 @@ router.get('/:id/payment-link', auth, async (req, res) => {
     assetIssuer: '',
     memo: `order:${order.id}`,
   });
-  res.json({ success: true, paymentLink: link, orderId: order.id });
+  res.json({
+    success: true,
+    paymentLink: link,
+    orderId: order.id,
+    expiresAt: new Date(new Date(order.created_at).getTime() + 30 * 60 * 1000).toISOString(),
+  });
 });
 
 // SSE clients map: userId -> Set of response objects
