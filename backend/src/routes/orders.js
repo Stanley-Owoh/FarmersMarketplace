@@ -673,8 +673,10 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
+
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
