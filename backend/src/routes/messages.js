@@ -4,8 +4,9 @@ const auth = require('../middleware/auth');
 const sseAuth = require('../middleware/sseAuth');
 const { err } = require('../middleware/error');
 const { sanitizeText } = require('../utils/sanitize');
+const realtime = require('../utils/realtime');
 
-// SSE client registry: userId -> Set of response objects
+// SSE client registry: userId -> Set of response objects (local to this process)
 const sseClients = new Map();
 
 function notifyUser(userId, event, data) {
@@ -20,6 +21,11 @@ function notifyUser(userId, event, data) {
     }
   }
 }
+
+// Deliver events published by any instance to this process's local subscribers.
+realtime.subscribe('messages', (event, data) => {
+  if (data && data.userId != null) notifyUser(data.userId, event, data.message);
+});
 
 // POST /api/messages — send a message
 router.post('/', auth, async (req, res) => {
@@ -48,7 +54,7 @@ router.post('/', auth, async (req, res) => {
     const { rows: msg } = await db.query('SELECT * FROM messages WHERE id = $1', [rows[0].id]);
     const message = msg[0];
 
-    notifyUser(receiver_id, 'new_message', message);
+    realtime.publish('messages', 'new_message', { userId: receiver_id, message });
 
     res.status(201).json({ success: true, data: message });
   } catch (e) {
@@ -202,4 +208,17 @@ router.get('/:userId', auth, async (req, res) => {
   const offset = (page - 1) * limit;
 
   try {
-    await d
+    await db.query('SELECT id FROM users WHERE id = $1', [otherUserId]);
+    const { rows } = await db.query(
+      `SELECT * FROM messages
+       WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)
+       ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+      [currentUserId, otherUserId, limit, offset]
+    );
+    res.json({ success: true, data: rows.reverse() });
+  } catch (e) {
+    err(res, 500, 'Failed to fetch messages: ' + e.message, 'server_error');
+  }
+});
+
+module.exports = router;
