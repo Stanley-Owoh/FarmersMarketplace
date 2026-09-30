@@ -625,6 +625,7 @@ async function invokeEscrowContract({
   farmerPublicKey,
   amount,
   timeoutUnix,
+  buyerBps,
 }) {
   const contractId = process.env.SOROBAN_ESCROW_CONTRACT_ID;
   const xlmTokenContractId = process.env.SOROBAN_XLM_TOKEN_CONTRACT_ID;
@@ -656,10 +657,26 @@ async function invokeEscrowContract({
       StellarSdk.nativeToScVal(Number(timeoutUnix), { type: 'u64' })
     );
   } else if (action === 'release') {
+    // release(order_id, caller). There is deliberately no fee argument: the platform
+    // fee is read from the contract's own storage (set by `initialize`), never from
+    // the caller (#1301). The signer must be the escrow buyer or the platform admin.
     operation = contract.call(
       'release',
-      StellarSdk.nativeToScVal(xlmTokenContractId, { type: 'address' }),
-      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' })
+      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+      StellarSdk.nativeToScVal(keypair.publicKey(), { type: 'address' })
+    );
+  } else if (action === 'resolve_dispute') {
+    // resolve_dispute(order_id, buyer_bps): admin-only; buyer_bps is the buyer's share
+    // in basis points (0 = all to farmer, 10000 = full refund). The contract deducts
+    // the platform fee and cooperative royalty from the farmer's share (#1299).
+    const bps = Number(buyerBps);
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
+      throw new Error('buyerBps must be an integer between 0 and 10000');
+    }
+    operation = contract.call(
+      'resolve_dispute',
+      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+      StellarSdk.nativeToScVal(bps, { type: 'u32' })
     );
   } else if (action === 'refund') {
     operation = contract.call(

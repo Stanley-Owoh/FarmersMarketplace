@@ -125,9 +125,14 @@ function ResolveDisputeModal({ dispute, onConfirm, onCancel }) {
           {resolution === 'split' && (
             <>
               <label style={{ display: 'block', fontSize: 13, color: '#555', marginBottom: 4 }}>Buyer share (%)</label>
-              <input type="number" min="0" max="100" required value={splitPercentBuyer}
+              <input type="number" min="0" max="100" step="0.01" required value={splitPercentBuyer}
+                aria-describedby="split-hint"
                 onChange={e => setSplitPercentBuyer(e.target.value)}
-                style={{ width: '100%', padding: '8px 12px', border: '1px solid #ddd', borderRadius: 8, fontSize: 14, marginBottom: 14, boxSizing: 'border-box' }} />
+                style={{ width: '100%', padding: '8px 12px', border: '1px solid #ddd', borderRadius: 8, fontSize: 14, marginBottom: 6, boxSizing: 'border-box' }} />
+              <div id="split-hint" style={{ fontSize: 12, color: '#666', marginBottom: 14 }}>
+                The buyer is refunded this share in full. The farmer receives the remainder
+                after the platform fee and any cooperative royalty.
+              </div>
             </>
           )}
           {err && <div style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>{err}</div>}
