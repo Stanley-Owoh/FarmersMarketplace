@@ -16,7 +16,7 @@
 /// ```
 /// where `t` is the current ledger timestamp.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, token, Address, Env};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -498,7 +498,10 @@ pub fn top_up(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
 
     fn make_stream(env: &Env, rate: i128, deposit: i128, start: u64, end: u64) -> PaymentStream {
         PaymentStream {
@@ -626,7 +629,9 @@ mod tests {
     #[test]
     fn on_chain_decrease_rate_returns_correct_surplus() {
         let env = Env::default();
+        let contract_id = env.register(crate::EscrowContract, ());
         env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
         env.ledger().set_timestamp(30);
 
         let sender = Address::generate(&env);
@@ -653,12 +658,15 @@ mod tests {
         assert_eq!(updated.rate_per_second, 5);
         assert_eq!(updated.accrued_at_checkpoint, 300);
         assert_eq!(updated.deposit, 650); // 1000 - 350
+        });
     }
 
     #[test]
     fn on_chain_get_accrued_returns_live_value_before_and_after_rate_change() {
         let env = Env::default();
+        let contract_id = env.register(crate::EscrowContract, ());
         env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
         env.ledger().set_timestamp(20);
 
         let sender = Address::generate(&env);
@@ -683,6 +691,7 @@ mod tests {
 
         // After checkpoint at t=20 with new rate=5, get_accrued at t=20 = 200
         assert_eq!(get_accrued_amount_on_chain(&env, 2), 200);
+        });
     }
 
     // ── create_stream (issue #969) ────────────────────────────────────────────
@@ -690,7 +699,9 @@ mod tests {
     #[test]
     fn create_stream_allocates_id_and_persists() {
         let env = Env::default();
+        let contract_id = env.register(crate::EscrowContract, ());
         env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
         env.ledger().set_timestamp(100);
 
         let sender = Address::generate(&env);
@@ -703,6 +714,7 @@ mod tests {
         // Second allocation should return 2.
         let stream_id2 = allocate_stream_id(&env);
         assert_eq!(stream_id2, 2);
+        });
     }
 
     #[test]
@@ -783,7 +795,9 @@ mod tests {
     #[test]
     fn withdraw_computes_delta_correctly() {
         let env = Env::default();
+        let contract_id = env.register(crate::EscrowContract, ());
         env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
         env.ledger().set_timestamp(0);
 
         let sender = Address::generate(&env);
@@ -808,6 +822,7 @@ mod tests {
         // verify the math in the stream state.
         let retrieved: PaymentStream = env.storage().persistent().get(&StreamKey::Stream(10)).unwrap();
         assert_eq!(get_accrued_amount(&retrieved, 30), 300);
+        });
     }
 
     #[test]
