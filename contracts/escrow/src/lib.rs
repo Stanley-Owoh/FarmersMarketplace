@@ -41,13 +41,17 @@ const MAX_BATCH_RELEASE: u32 = 20;
 const MAX_COOP_SIGNERS: u32 = 15;
 /// Maximum limit for paginated escrow queries to prevent excessive read costs. (#980)
 const MAX_ESCROW_PAGE_SIZE: u32 = 100;
+/// Maximum order_ids kept per address in the buyer/farmer escrow indexes. (#1289)
+/// Each deposit rewrites the whole index vector, so read/write cost grows
+/// linearly with its length; once full, the oldest entry is dropped.
+const MAX_INDEX_ENTRIES: u32 = 1_000;
 
 // ---------------------------------------------------------------------------
 // EscrowError discriminant registry
 // Each variant has a stable u32 code that is part of the on-chain ABI.
 // NEVER reuse a code, even after removing a variant.
 // When adding a new variant, use NEXT_CODE and increment it.
-// NEXT_CODE: 23
+// NEXT_CODE: 24
 // ---------------------------------------------------------------------------
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -88,6 +92,8 @@ pub enum EscrowError {
     AutoReleaseNotReached  = 21,
     /// Cooperative signer configuration exceeds maximum allowed. (#979)
     TooManyCoopSigners     = 22,
+    /// Buyer equals farmer, or the cooperative address equals either party. (#1290)
+    InvalidParties         = 23,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -346,11 +352,7 @@ impl EscrowContract {
             return Err(EscrowError::InvalidAmount);
         }
 
-        let key = DataKey::Escrow(order_id);
-        if env.storage().persistent().has(&key) {
-            panic!("escrow already exists");
-        }
-        }
+        Self::validate_parties(&buyer, &farmer, &cooperative_address, cooperative_royalty_bps)?;
 
         // Royalty bps must not exceed 10 000 (100%)
         if cooperative_royalty_bps > 10_000 {
@@ -368,7 +370,8 @@ impl EscrowContract {
         }
 
         // #838: duplicate order_id — immutable, regardless of settlement state
-        if env.storage().persistent().has(&DataKey::Escrow(order_id)) {
+        let key = DataKey::Escrow(order_id);
+        if env.storage().persistent().has(&key) {
             return Err(EscrowError::AlreadyExists);
         }
 
@@ -378,9 +381,6 @@ impl EscrowContract {
             return Err(EscrowError::InvalidAmount); // reuse InvalidAmount; callers can check message
         }
 
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&buyer, &env.current_contract_address(), &amount);
-
         let auto_release_days: u64 = env
             .storage()
             .instance()
@@ -388,31 +388,78 @@ impl EscrowContract {
             .unwrap_or(Self::DEFAULT_AUTO_RELEASE_DAYS);
         let escrow = Escrow {
             buyer: buyer.clone(),
-            farmer,
             farmer: farmer.clone(),
-            // Clone token before moving it into the struct so we can persist it separately.
             token: token.clone(),
             amount,
             timeout_unix,
             status: EscrowStatus::Active,
-            cooperative_address: cooperative_address.clone(),
+            cooperative_address,
             cooperative_royalty_bps,
             auto_release_unix: now.saturating_add(auto_release_days.saturating_mul(86400)),
             dispute_opened_at: 0,
             release_after_unix,
         };
 
-        // Effects before interactions: the escrow record is written before the token
-        // transfer below so a reentrant deposit() for the same order_id (triggered by
-        // a malicious token/callback during the transfer) sees `has(&key) == true` and
-        // is rejected, instead of racing past the check above.
+        // Effects before interactions: the escrow record (and its Token key, #1288)
+        // is written before the single token transfer below, so a reentrant
+        // deposit() for the same order_id sees `has(&key) == true` and is rejected.
         env.storage().persistent().set(&key, &escrow);
         env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_AMOUNT);
+        let token_key = DataKey::Token(order_id);
+        env.storage().persistent().set(&token_key, &token);
+        env.storage()
+            .persistent()
+            .extend_ttl(&token_key, BUMP_THRESHOLD, BUMP_AMOUNT);
+        Self::index_escrow(&env, &buyer, &farmer, order_id);
 
-        let token_client = token::Client::new(&env, &xlm_token);
-        token_client.transfer(&buyer, &env.current_contract_address(), &amount);
+        // #1287: exactly one buyer → contract transfer, after state is persisted.
+        token::Client::new(&env, &token).transfer(
+            &buyer,
+            &env.current_contract_address(),
+            &amount,
+        );
 
         Ok(())
+    }
+
+    /// Rejects self-escrow and cooperative addresses that route value back to a
+    /// party, plus a royalty with no cooperative to receive it. (#1290)
+    fn validate_parties(
+        buyer: &Address,
+        farmer: &Address,
+        cooperative_address: &Option<Address>,
+        cooperative_royalty_bps: u32,
+    ) -> Result<(), EscrowError> {
+        if buyer == farmer {
+            return Err(EscrowError::InvalidParties);
+        }
+        match cooperative_address {
+            Some(coop) if coop == buyer || coop == farmer => Err(EscrowError::InvalidParties),
+            None if cooperative_royalty_bps > 0 => Err(EscrowError::InvalidParties),
+            _ => Ok(()),
+        }
+    }
+
+    /// Appends `order_id` to the buyer and farmer escrow indexes (#1289).
+    fn index_escrow(env: &Env, buyer: &Address, farmer: &Address, order_id: u64) {
+        Self::index_append(env, DataKey::BuyerEscrows(buyer.clone()), order_id);
+        Self::index_append(env, DataKey::FarmerEscrows(farmer.clone()), order_id);
+    }
+
+    /// Appends to one index, dropping the oldest entry once `MAX_INDEX_ENTRIES`
+    /// is reached so the per-address read/write cost stays bounded.
+    fn index_append(env: &Env, key: DataKey, order_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if ids.len() >= MAX_INDEX_ENTRIES {
+            ids.remove(0);
+        }
+        ids.push_back(order_id);
+        env.storage().persistent().set(&key, &ids);
+        env.storage().persistent().extend_ttl(&key, TTL_MIN, TTL_MAX);
     }
 
     /// Create multiple escrows in a single transaction to reduce fees (#689).
@@ -426,10 +473,11 @@ impl EscrowContract {
     ) -> Result<(), EscrowError> {
         // Validate all entries first (fail-fast before touching state).
         for entry in entries.iter() {
-            let (order_id, _buyer, _farmer, _token, amount, _timeout) = entry;
+            let (order_id, buyer, farmer, _token, amount, _timeout) = entry;
             if amount <= 0 {
                 return Err(EscrowError::InvalidAmount);
             }
+            Self::validate_parties(&buyer, &farmer, &None, 0)?;
             if env.storage().persistent().has(&DataKey::Escrow(order_id)) {
                 return Err(EscrowError::AlreadyExists);
             }
@@ -439,9 +487,6 @@ impl EscrowContract {
             let (order_id, buyer, farmer, token, amount, timeout_unix) = entry;
             buyer.require_auth();
 
-            let token_client = token::Client::new(&env, &token);
-            token_client.transfer(&buyer, &env.current_contract_address(), &amount);
-
             let now = env.ledger().timestamp();
             let auto_release_days: u64 = env
                 .storage()
@@ -449,9 +494,9 @@ impl EscrowContract {
                 .get(&DataKey::AutoReleaseDays)
                 .unwrap_or(Self::DEFAULT_AUTO_RELEASE_DAYS);
             let escrow = Escrow {
-                buyer,
-                farmer,
-                token,
+                buyer: buyer.clone(),
+                farmer: farmer.clone(),
+                token: token.clone(),
                 amount,
                 timeout_unix,
                 status: EscrowStatus::Active,
@@ -473,6 +518,13 @@ impl EscrowContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&DataKey::Token(order_id), TTL_MIN, TTL_MAX);
+            Self::index_escrow(&env, &buyer, &farmer, order_id);
+
+            token::Client::new(&env, &token).transfer(
+            &buyer,
+            &env.current_contract_address(),
+            &amount,
+        );
         }
         Ok(())
     }
@@ -1720,6 +1772,9 @@ impl EscrowContract {
                 .instance()
                 .get(&DataKey::AutoReleaseDays)
                 .unwrap_or(Self::DEFAULT_AUTO_RELEASE_DAYS);
+            // #1289: backfill the buyer/farmer indexes for migrated records.
+            Self::index_escrow(&env, &record.buyer, &record.farmer, order_id);
+
             let new_escrow = Escrow {
                 buyer: record.buyer,
                 farmer: record.farmer,
@@ -3973,5 +4028,207 @@ mod test {
         )
         .unwrap_err();
         assert_eq!(err, EscrowError::InvalidAmount);
+    }
+}
+
+// ── #1287 / #1288 / #1289 / #1290: single-deposit path ──────────────────────
+#[cfg(test)]
+mod deposit_path_test {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{Client as TokenClient, StellarAssetClient},
+        Address, Env,
+    };
+
+    const AMOUNT: i128 = 10_000_000;
+    const TIMEOUT: u64 = 10_000;
+
+    struct Setup {
+        env: Env,
+        client: EscrowContractClient<'static>,
+        token: Address,
+        buyer: Address,
+        farmer: Address,
+    }
+
+    fn setup() -> Setup {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        let client = EscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &0, &Address::generate(&env));
+        let token = env.register_stellar_asset_contract_v2(admin).address();
+        let buyer = Address::generate(&env);
+        let farmer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&buyer, &(AMOUNT * 10));
+        Setup { env, client, token, buyer, farmer }
+    }
+
+    fn deposit(s: &Setup, order_id: u64, buyer: &Address) {
+        s.client.deposit(
+            &s.token, &order_id, buyer, &s.farmer, &AMOUNT, &TIMEOUT, &None, &0, &0,
+        );
+    }
+
+    #[test]
+    fn deposit_transfers_amount_exactly_once() {
+        let s = setup();
+        let tc = TokenClient::new(&s.env, &s.token);
+        let before = tc.balance(&s.buyer);
+        deposit(&s, 1, &s.buyer);
+        assert_eq!(tc.balance(&s.buyer), before - AMOUNT);
+        assert_eq!(tc.balance(&s.client.address), AMOUNT);
+    }
+
+    #[test]
+    fn duplicate_deposit_returns_already_exists_and_moves_no_tokens() {
+        let s = setup();
+        let tc = TokenClient::new(&s.env, &s.token);
+        deposit(&s, 1, &s.buyer);
+        let before = tc.balance(&s.buyer);
+        let res = s.client.try_deposit(
+            &s.token, &1, &s.buyer, &s.farmer, &AMOUNT, &TIMEOUT, &None, &0, &0,
+        );
+        assert_eq!(res, Err(Ok(EscrowError::AlreadyExists)));
+        assert_eq!(tc.balance(&s.buyer), before);
+        assert_eq!(tc.balance(&s.client.address), AMOUNT);
+    }
+
+    #[test]
+    fn deposit_stores_token_key() {
+        let s = setup();
+        deposit(&s, 1, &s.buyer);
+        let stored: Option<Address> = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().get(&DataKey::Token(1))
+        });
+        assert_eq!(stored, Some(s.token.clone()));
+    }
+
+    #[test]
+    fn deposit_then_release() {
+        let s = setup();
+        deposit(&s, 1, &s.buyer);
+        s.client.release(&1, &0, &s.buyer);
+        assert_eq!(TokenClient::new(&s.env, &s.token).balance(&s.farmer), AMOUNT);
+    }
+
+    #[test]
+    fn deposit_then_refund_after_timeout() {
+        let s = setup();
+        let tc = TokenClient::new(&s.env, &s.token);
+        let before = tc.balance(&s.buyer);
+        deposit(&s, 1, &s.buyer);
+        s.env.ledger().with_mut(|l| l.timestamp = TIMEOUT + 1);
+        s.client.refund(&1);
+        assert_eq!(tc.balance(&s.buyer), before);
+    }
+
+    #[test]
+    fn deposit_then_dispute_then_resolve() {
+        let s = setup();
+        deposit(&s, 1, &s.buyer);
+        s.client.dispute(&1, &s.buyer);
+        s.client.resolve_dispute(&1, &true);
+        assert_eq!(TokenClient::new(&s.env, &s.token).balance(&s.farmer), AMOUNT);
+    }
+
+    #[test]
+    fn deposits_populate_buyer_and_farmer_indexes() {
+        let s = setup();
+        let n: u64 = 5;
+        for id in 1..=n {
+            deposit(&s, id, &s.buyer);
+        }
+        let page = s.client.get_buyer_escrows(&s.buyer, &0, &100);
+        assert_eq!(page.total, n as u32);
+        for i in 0..n as u32 {
+            assert_eq!(page.escrows.get(i), Some(i as u64 + 1));
+        }
+        assert_eq!(s.client.get_farmer_escrows(&s.farmer, &0, &100).total, n as u32);
+
+        let tail = s.client.get_buyer_escrows(&s.buyer, &3, &100);
+        assert_eq!(tail.escrows.len(), 2);
+        assert_eq!(tail.escrows.get(0), Some(4));
+
+        let past_end = s.client.get_buyer_escrows(&s.buyer, &(n as u32 + 1), &10);
+        assert_eq!(past_end.escrows.len(), 0);
+        assert_eq!(past_end.total, n as u32);
+
+        let big = s.client.get_buyer_escrows(&s.buyer, &0, &(MAX_ESCROW_PAGE_SIZE + 50));
+        assert_eq!(big.escrows.len(), n as u32);
+    }
+
+    #[test]
+    fn batch_deposit_populates_indexes() {
+        let s = setup();
+        let mut entries = Vec::new(&s.env);
+        entries.push_back((
+            1u64,
+            s.buyer.clone(),
+            s.farmer.clone(),
+            s.token.clone(),
+            AMOUNT,
+            TIMEOUT,
+        ));
+        entries.push_back((
+            2u64,
+            s.buyer.clone(),
+            s.farmer.clone(),
+            s.token.clone(),
+            AMOUNT,
+            TIMEOUT,
+        ));
+        s.client.batch_deposit(&entries);
+        assert_eq!(s.client.get_buyer_escrows(&s.buyer, &0, &10).total, 2);
+        assert_eq!(s.client.get_farmer_escrows(&s.farmer, &0, &10).total, 2);
+    }
+
+    #[test]
+    fn deposit_rejects_buyer_equal_farmer() {
+        let s = setup();
+        let res = s.client.try_deposit(
+            &s.token, &1, &s.buyer, &s.buyer, &AMOUNT, &TIMEOUT, &None, &0, &0,
+        );
+        assert_eq!(res, Err(Ok(EscrowError::InvalidParties)));
+    }
+
+    #[test]
+    fn deposit_rejects_cooperative_equal_to_party() {
+        let s = setup();
+        for coop in [s.buyer.clone(), s.farmer.clone()] {
+            let res = s.client.try_deposit(
+                &s.token, &1, &s.buyer, &s.farmer, &AMOUNT, &TIMEOUT, &Some(coop), &100, &0,
+            );
+            assert_eq!(res, Err(Ok(EscrowError::InvalidParties)));
+        }
+    }
+
+    #[test]
+    fn deposit_rejects_royalty_without_cooperative() {
+        let s = setup();
+        let res = s.client.try_deposit(
+            &s.token, &1, &s.buyer, &s.farmer, &AMOUNT, &TIMEOUT, &None, &100, &0,
+        );
+        assert_eq!(res, Err(Ok(EscrowError::InvalidParties)));
+    }
+
+    #[test]
+    fn batch_deposit_rejects_buyer_equal_farmer() {
+        let s = setup();
+        let mut entries = Vec::new(&s.env);
+        entries.push_back((
+            1u64,
+            s.buyer.clone(),
+            s.buyer.clone(),
+            s.token.clone(),
+            AMOUNT,
+            TIMEOUT,
+        ));
+        assert_eq!(
+            s.client.try_batch_deposit(&entries),
+            Err(Ok(EscrowError::InvalidParties))
+        );
     }
 }
