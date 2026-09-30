@@ -4,6 +4,10 @@
 # Verifies that every EscrowError variant in contracts/escrow/src/lib.rs
 # has a matching row in the README "Error Codes" table, and vice-versa.
 #
+# Codes are on-chain ABI values and must stay stable and append-only:
+#   - variants are numbered 1..N in declaration order (no gaps, no reuse);
+#   - the `// NEXT_CODE: N` comment above the enum equals the last code + 1.
+#
 # Run from the repo root or from contracts/:
 #   bash contracts/scripts/check-escrow-error-codes.sh
 #
@@ -19,18 +23,12 @@ README="$REPO_ROOT/README.md"
 
 # ---------------------------------------------------------------------------
 # Extract "VariantName = N" pairs from the EscrowError enum in lib.rs.
-# We grab lines between the #[repr(u32)] enum declaration and its closing '}'.
+# We grab lines between the enum declaration and its closing '}' (POSIX sed,
+# so it runs without gawk).
 # ---------------------------------------------------------------------------
 enum_codes() {
-  awk '
-    /^pub enum EscrowError/  { in_enum=1; next }
-    in_enum && /^\}/ { in_enum=0; next }
-    in_enum {
-      # match lines like:  SomeName = 42,
-      if (match($0, /([A-Za-z]+)[[:space:]]*=[[:space:]]*([0-9]+)/, arr))
-        print arr[2] " " arr[1]
-    }
-  ' "$LIB" | sort -n
+  sed -n '/^pub enum EscrowError/,/^}/p' "$LIB" \
+    | sed -nE 's/^[[:space:]]*([A-Za-z]+)[[:space:]]*=[[:space:]]*([0-9]+).*/\2 \1/p'
 }
 
 # ---------------------------------------------------------------------------
@@ -42,8 +40,23 @@ readme_codes() {
     | sort -n
 }
 
-ENUM=$(enum_codes)
+DECLARED=$(enum_codes)
+ENUM=$(echo "$DECLARED" | sort -n)
 README_TABLE=$(readme_codes)
+
+# Append-only: codes must read 1, 2, ..., N in declaration order.
+COUNT=$(echo "$DECLARED" | wc -l)
+if [ "$(echo "$DECLARED" | awk '{print $1}')" != "$(seq 1 "$COUNT")" ]; then
+  echo "✗ EscrowError codes must be numbered 1..$COUNT in declaration order (append-only, no gaps or reuse)."
+  echo "$DECLARED"
+  exit 1
+fi
+
+NEXT_CODE=$(sed -nE 's|^// NEXT_CODE: ([0-9]+).*|\1|p' "$LIB")
+if [ "$NEXT_CODE" != "$((COUNT + 1))" ]; then
+  echo "✗ NEXT_CODE comment in lib.rs is '${NEXT_CODE}', expected $((COUNT + 1))."
+  exit 1
+fi
 
 if [ "$ENUM" = "$README_TABLE" ]; then
   echo "✓ EscrowError codes match README table."
