@@ -202,26 +202,6 @@ export default function Subscriptions() {
         <h3 style={{ marginBottom: 16, color: '#333' }}>My Subscriptions ({subs.length})</h3>
         {loading ? <Spinner /> : subs.length === 0 ? (
           <p style={{ color: '#888', fontSize: 14 }}>No active subscriptions.</p>
-        ) : subs.map(sub => (
-          <div key={sub.id} style={s.row}>
-            <div>
-              <div style={s.name}>{sub.product_name}</div>
-              <div style={s.meta}>{sub.quantity} {sub.unit} · {FREQ_LABEL[sub.frequency]} · {sub.product_price} XLM/unit</div>
-              <div style={s.meta}>
-                Next order: {sub.next_order_at && !isNaN(new Date(sub.next_order_at))
-                  ? new Date(sub.next_order_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-                  : 'Not scheduled'}
-              </div>
-            </div>
-            <div style={s.actions}>
-              <span style={{ ...s.badge, ...STATUS_STYLE[sub.status] }}>{sub.status}</span>
-              {sub.status === 'active' && (
-                <button style={{ ...s.smBtn, background: '#fff3cd', color: '#856404' }} onClick={() => handleAction(sub.id, 'pause')}>Pause</button>
-              )}
-              {sub.status === 'paused' && (
-                <button style={{ ...s.smBtn, background: '#d8f3dc', color: '#2d6a4f' }} onClick={() => handleAction(sub.id, 'resume')}>Resume</button>
-              )}
-              <button style={{ ...s.smBtn, background: '#fee', color: '#c0392b' }} onClick={() => { if (confirm('Cancel this subscription?')) handleAction(sub.id, 'cancel'); }}>Cancel</button>
         ) : subs.map(sub => {
           const nextAmount = sub.product_price && sub.quantity
             ? `${(sub.product_price * sub.quantity).toFixed(2)} XLM`
@@ -232,7 +212,11 @@ export default function Subscriptions() {
                 <div style={s.name}>{sub.product_name}</div>
                 <div style={s.meta}>{sub.quantity} {sub.unit} · {FREQ_LABEL[sub.frequency]}</div>
                 {nextAmount && <div style={s.meta}>Next renewal amount: <strong>{nextAmount}</strong></div>}
-                <div style={s.meta}>Next renewal date: {new Date(sub.next_order_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
+                <div style={s.meta}>
+                  Next renewal date: {sub.next_order_at && !isNaN(new Date(sub.next_order_at))
+                    ? new Date(sub.next_order_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                    : 'Not scheduled'}
+                </div>
                 {sub.next_billing_at ? (
                   <div style={s.meta}>Next billing: {new Date(sub.next_billing_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
                 ) : (

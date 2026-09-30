@@ -30,6 +30,7 @@ const CATEGORIES = [
   "other",
 ];
 const PAGE_SIZE = 20;
+const SEARCH_DEBOUNCE_MS = 300;
 const MAX_PRICE = 500;
 const ALL_ALLERGENS = ["gluten", "nuts", "dairy", "eggs", "soy", "shellfish"];
 const GRADES = ["A", "B", "C", "Ungraded"];
@@ -412,11 +413,9 @@ export default function Marketplace() {
     return date.toLocaleDateString(i18n.language, { year: 'numeric', month: 'short', day: 'numeric' });
   };
 
-  const debouncedSearch = useDebounce(filters.search, 300);
-  const debouncedSeller = useDebounce(filters.seller, 300);
+  const debouncedSearch = useDebounce(filters.search, SEARCH_DEBOUNCE_MS);
+  const debouncedSeller = useDebounce(filters.seller, SEARCH_DEBOUNCE_MS);
   const debouncedRadius = useDebounce(filters.radius, 400);
-  const debouncedSearch = useDebounce(filters.search, 400);
-  const debouncedSeller = useDebounce(filters.seller, 400);
 
   const abortRef = useRef(null);
   const sentinelRef = useRef(null);
