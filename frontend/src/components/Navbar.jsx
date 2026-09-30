@@ -201,25 +201,30 @@ export default function Navbar() {
             )}
             <button style={s.toggleBtn} onClick={toggleTheme} aria-label="Toggle dark mode">{theme === 'light' ? '🌙' : '☀️'}</button>
             <button style={{ ...s.toggleBtn, fontSize: 12, minWidth: 120, color: '#fff' }} onClick={useSystemTheme} aria-label="Use system theme">
-              {isUsingSystemTheme ? 'System' : 'Use system'}
+              {isUsingSystemTheme ? 'System ✓' : 'Use system'}
             </button>
             <button style={s.btn} onClick={handleLogout}>Logout</button>
           </>
         ) : (
           <>
+            <NavLink to="/marketplace" style={navLinkStyle} onClick={closeDrawer}>Browse</NavLink>
             <NavLink to="/login" style={navLinkStyle} onClick={closeDrawer}>Login</NavLink>
             <NavLink to="/register" style={navLinkStyle} onClick={closeDrawer}>Register</NavLink>
+            <button style={s.toggleBtn} onClick={toggleTheme} aria-label="Toggle dark mode">{theme === 'light' ? '🌙' : '☀️'}</button>
+            <button style={{ ...s.toggleBtn, fontSize: 12, minWidth: 120, color: '#fff' }} onClick={useSystemTheme} aria-label="Use system theme">
+              {isUsingSystemTheme ? 'System ✓' : 'Use system'}
+            </button>
           </>
         )}
         <select
           style={s.langSelect}
           value={i18n.language}
-          onChange={e => i18n.changeLanguage(e.target.value)}
+          onChange={(e) => i18n.changeLanguage(e.target.value)}
           aria-label="Select language"
         >
-          <option value="en">EN</option>
-          <option value="sw">SW</option>
-          <option value="ar">AR</option>
+          <option value="en">English</option>
+          <option value="es">Español</option>
+          <option value="fr">Français</option>
         </select>
       </div>
     </nav>
