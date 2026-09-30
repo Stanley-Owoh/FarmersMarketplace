@@ -511,3 +511,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1370 -->
 - #1370: The frontend production build is broken: 7 source files fail to parse
+
+<!-- handsoff-issue-1372 -->
+- #1372: `Dashboard.jsx` doesn't parse: the style object isn't closed properly (L202)
