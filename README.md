@@ -506,3 +506,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for full guidance on:
 - Issue workflow and label guide
 
 For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md) instead of opening a public issue.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1383 -->
+- #1383: Dashboard CSV/JSON export sends no auth token, uses the deprecated prefix, and saves error bodies as files
