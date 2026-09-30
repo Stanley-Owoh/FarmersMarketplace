@@ -79,3 +79,18 @@ The reward-token TTL gap is logged as a known follow-up (not an escrow contract,
 scope for this issue's remediation). Fee-arithmetic and role/pause/upgrade auth items
 are marked N/A because those features don't exist yet — this checklist should be
 re-run against them before they ship.
+
+## Cooperative multisig invariants (`contracts/escrow`, #1296–#1298)
+
+- `set_coop(coop, members, threshold)` **must** enforce `1 <= threshold <= members.len()` and reject
+  duplicate member keys (`InvalidCoopConfig`). `multisig_release` has no `require_auth`; the
+  signature count is its only protection, so a zero threshold would let anyone release any escrow.
+  `multisig_release` re-checks `threshold != 0` to guard against legacy stored configs.
+- Config is keyed per cooperative (`DataKey::CoopConfig(Address)`) and `multisig_release` loads the
+  config for `escrow.cooperative_address`; escrows without a cooperative cannot use it.
+- Signed payload: `sha256(contract_address_xdr || order_id_be_u64)` (`Address::to_xdr`, then 8 big-endian
+  bytes). Signers (backend/CLI) must build this exact message per deployment.
+- Settlement applies the same token check, `release_after_unix` lock, platform fee, cooperative royalty,
+  events and buyer rewards as `release()`.
+- **Migration:** the old single `DataKey::CoopConfig` entry is no longer read. After upgrading, the admin
+  must call `set_coop` once per cooperative address, and signers must re-sign with the new payload.
