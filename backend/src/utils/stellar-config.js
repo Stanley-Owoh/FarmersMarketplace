@@ -10,11 +10,6 @@ if (!['testnet', 'mainnet'].includes(STELLAR_NETWORK)) {
   throw new Error(`Invalid STELLAR_NETWORK "${STELLAR_NETWORK}". Must be "testnet" or "mainnet".`);
 }
 
-const isTestnet = STELLAR_NETWORK === 'testnet';
-
-const horizonUrl =
-  process.env.STELLAR_HORIZON_URL ||
-  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
 if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== 'true') {
   throw new Error(
     'Mainnet use requires STELLAR_MAINNET_CONFIRMED=true in your environment. ' +
@@ -24,29 +19,25 @@ if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== '
 
 const isTestnet = STELLAR_NETWORK === 'testnet';
 
+const horizonUrl =
+  process.env.STELLAR_HORIZON_URL ||
+  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
+
 const sorobanRpcUrl =
   process.env.SOROBAN_RPC_URL ||
   (isTestnet ? 'https://soroban-testnet.stellar.org' : 'https://soroban.stellar.org');
 
 const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.Networks.PUBLIC;
-const server = new StellarSdk.Horizon.Server(horizonUrl);
 
-module.exports = {
-  StellarSdk,
-  STELLAR_NETWORK,
-  isTestnet,
-  horizonUrl,
-  sorobanRpcUrl,
-  networkPassphrase,
-  server,
-const sorobanServer = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
+function normalizeServerUrlCompat(serverInstance) {
+  if (serverInstance && serverInstance.serverURL && typeof serverInstance.serverURL.href === 'function') {
+    serverInstance.serverURL.href = String(serverInstance.serverURL.href());
+  }
+  return serverInstance;
+}
 
-const horizonUrl =
-  process.env.STELLAR_HORIZON_URL ||
-  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
-
-const server = new StellarSdk.Horizon.Server(horizonUrl);
-const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.Networks.PUBLIC;
+const server = normalizeServerUrlCompat(new StellarSdk.Horizon.Server(horizonUrl));
+const sorobanServer = normalizeServerUrlCompat(new StellarSdk.SorobanRpc.Server(sorobanRpcUrl));
 
 // Required Soroban/escrow environment variables. Missing values cause cryptic
 // runtime failures at the contract call site, so we validate them at startup.
@@ -78,7 +69,7 @@ function validateStellarConfig() {
   logger.info(`[stellar-config] Validating Stellar config for ${network} (${networkPassphrase})`);
 
   const resolved = {
-    SOROBAN_RPC_URL: sorobanRpcUrl, // always set (falls back to a network default)
+    SOROBAN_RPC_URL: sorobanRpcUrl,
     SOROBAN_ESCROW_CONTRACT_ID: process.env.SOROBAN_ESCROW_CONTRACT_ID,
     SOROBAN_XLM_TOKEN_CONTRACT_ID: process.env.SOROBAN_XLM_TOKEN_CONTRACT_ID,
   };
@@ -102,9 +93,12 @@ function validateStellarConfig() {
 
 module.exports = {
   StellarSdk,
+  STELLAR_NETWORK,
   isTestnet,
+  horizonUrl,
+  sorobanRpcUrl,
+  networkPassphrase,
   server,
   sorobanServer,
-  networkPassphrase,
   validateStellarConfig,
 };

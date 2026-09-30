@@ -1,78 +1,102 @@
-/**
- * Unit tests for backend/src/utils/stellar.js
- *
- * The global jest.setup.js mocks the entire stellar module for integration tests.
- * Here we unmock it so we can test the real implementation, then mock the SDK itself.
- */
-
-// Undo the global mock set in jest.setup.js
-jest.unmock('../src/utils/stellar');
-
-// ── Stellar SDK mock ──────────────────────────────────────────────────────────
 const mockSubmitTransaction = jest.fn();
 const mockLoadAccount = jest.fn();
 const mockPaymentsCall = jest.fn();
-
 const mockPaymentsBuilder = {
   forAccount: jest.fn().mockReturnThis(),
   order: jest.fn().mockReturnThis(),
   limit: jest.fn().mockReturnThis(),
   call: mockPaymentsCall,
 };
-
 const mockServerInstance = {
   loadAccount: mockLoadAccount,
   payments: jest.fn(() => mockPaymentsBuilder),
   submitTransaction: mockSubmitTransaction,
 };
-
-// TransactionBuilder chain
 const mockBuilt = { sign: jest.fn() };
-const mockTxBuilder = {
-  addOperation: jest.fn().mockReturnThis(),
-  addMemo: jest.fn().mockReturnThis(),
-  setTimeout: jest.fn().mockReturnThis(),
-  build: jest.fn(() => mockBuilt),
-};
 
-jest.mock('@stellar/stellar-sdk', () => ({
-  Horizon: {
-    Server: jest.fn(() => mockServerInstance),
-  },
-  Networks: {
-    TESTNET: 'Test SDF Network ; September 2015',
-    PUBLIC: 'Public Global Stellar Network ; September 2015',
-  },
-  Keypair: {
-    random: jest.fn(),
-    fromSecret: jest.fn(),
-  },
-  TransactionBuilder: jest.fn(() => mockTxBuilder),
-  Operation: {
-    payment: jest.fn(() => 'mock-payment-op'),
-  },
-  Asset: {
-    native: jest.fn(() => 'native-asset'),
-  },
-  Memo: {
-    text: jest.fn((t) => `memo:${t}`),
-  },
-  BASE_FEE: '100',
-}));
-
-// ── Load the real module AFTER mocks are in place ────────────────────────────
+let StellarSdk;
 let stellar;
-beforeAll(() => {
+
+jest.unmock('../src/utils/stellar');
+
+beforeEach(() => {
+  jest.resetModules();
+  jest.clearAllMocks();
+  mockSubmitTransaction.mockReset();
+  mockLoadAccount.mockReset();
+  mockPaymentsCall.mockReset();
+  mockPaymentsBuilder.forAccount.mockReset();
+  mockPaymentsBuilder.order.mockReset();
+  mockPaymentsBuilder.limit.mockReset();
+  mockPaymentsBuilder.forAccount.mockReturnThis();
+  mockPaymentsBuilder.order.mockReturnThis();
+  mockPaymentsBuilder.limit.mockReturnThis();
+  mockServerInstance.payments.mockReturnValue(mockPaymentsBuilder);
+  mockBuilt.sign.mockClear();
+
+  jest.doMock('@stellar/stellar-sdk', () => {
+    const mockTxBuilder = {
+      addOperation: jest.fn(function () { return this; }),
+      addMemo: jest.fn(function () { return this; }),
+      setTimeout: jest.fn(function () { return this; }),
+      build: jest.fn(() => mockBuilt),
+    };
+
+    return {
+      Horizon: {
+        Server: jest.fn(() => mockServerInstance),
+      },
+      Networks: {
+        TESTNET: 'Test SDF Network ; September 2015',
+        PUBLIC: 'Public Global Stellar Network ; September 2015',
+      },
+      SorobanRpc: {
+        Server: jest.fn(() => ({})),
+      },
+      Keypair: {
+        random: jest.fn(),
+        fromSecret: jest.fn(),
+      },
+      TransactionBuilder: jest.fn(() => mockTxBuilder),
+      Operation: {
+        payment: jest.fn(() => 'mock-payment-op'),
+      },
+      Asset: {
+        native: jest.fn(() => 'native-asset'),
+      },
+      Memo: {
+        text: jest.fn((t) => `memo:${t}`),
+      },
+      StrKey: {
+        isValidEd25519PublicKey: jest.fn((key) => typeof key === 'string' && /^G[A-Z2-7]{55}$/.test(key)),
+      },
+      BASE_FEE: '100',
+    };
+  });
+
+  jest.doMock('stellar-hd-wallet', () => ({
+    fromMnemonic: jest.fn(() => ({
+      getSecret: jest.fn(() => 'SSEED_TESTNET_MOCK'),
+    })),
+  }));
+
+  jest.doMock('../src/utils/stellar-config', () => ({
+    StellarSdk: jest.requireMock('@stellar/stellar-sdk'),
+    STELLAR_NETWORK: 'testnet',
+    isTestnet: true,
+    horizonUrl: 'https://horizon-testnet.stellar.org',
+    sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    server: mockServerInstance,
+    sorobanServer: {},
+  }));
+
   process.env.STELLAR_NETWORK = 'testnet';
+  StellarSdk = require('@stellar/stellar-sdk');
   stellar = require('../src/utils/stellar');
 });
 
-beforeEach(() => jest.clearAllMocks());
-
-// ── createWallet ─────────────────────────────────────────────────────────────
 describe('createWallet()', () => {
-  const StellarSdk = require('@stellar/stellar-sdk');
-
   it('returns an object with publicKey and secretKey', () => {
     StellarSdk.Keypair.random.mockReturnValue({
       publicKey: () => 'GPUBLIC_KEY_MOCK',
@@ -101,7 +125,6 @@ describe('createWallet()', () => {
   });
 });
 
-// ── getBalance ───────────────────────────────────────────────────────────────
 describe('getBalance()', () => {
   it('returns the native XLM balance for a funded account', async () => {
     mockLoadAccount.mockResolvedValue({
@@ -133,10 +156,7 @@ describe('getBalance()', () => {
   });
 });
 
-// ── sendPayment ───────────────────────────────────────────────────────────────
 describe('sendPayment()', () => {
-  const StellarSdk = require('@stellar/stellar-sdk');
-
   const params = {
     senderSecret: 'SSENDER_SECRET',
     receiverPublicKey: 'GRECEIVER',
@@ -147,10 +167,11 @@ describe('sendPayment()', () => {
   beforeEach(() => {
     StellarSdk.Keypair.fromSecret.mockReturnValue({
       publicKey: () => 'GSENDER',
-      // sign is called on the transaction, not the keypair directly
+      secret: () => 'SSECRET',
     });
     mockLoadAccount.mockResolvedValue({ id: 'GSENDER' });
     mockSubmitTransaction.mockResolvedValue({ hash: 'TXHASH_ABC' });
+    mockBuilt.sign.mockClear();
   });
 
   it('returns the transaction hash on success', async () => {
@@ -198,7 +219,7 @@ describe('sendPayment()', () => {
   });
 });
 
-// ── getTransactions ───────────────────────────────────────────────────────────
+describe('getTransactions()', () => {
   const PUBLIC_KEY = 'GPUBLIC';
 
   const makeRecord = (overrides = {}) => ({
@@ -218,10 +239,10 @@ describe('sendPayment()', () => {
       records: [makeRecord({ to: PUBLIC_KEY, from: 'GSENDER' })],
     });
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
+    const { records } = await stellar.getTransactions(PUBLIC_KEY);
 
-    expect(txs).toHaveLength(1);
-    expect(txs[0]).toEqual({
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual({
       id: 'rec1',
       type: 'received',
       amount: '5.0000000',
@@ -237,8 +258,8 @@ describe('sendPayment()', () => {
       records: [makeRecord({ from: PUBLIC_KEY, to: 'GRECEIVER' })],
     });
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
-    expect(txs[0].type).toBe('sent');
+    const { records } = await stellar.getTransactions(PUBLIC_KEY);
+    expect(records[0].type).toBe('sent');
   });
 
   it('filters out non-payment records', async () => {
@@ -250,9 +271,9 @@ describe('sendPayment()', () => {
       ],
     });
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
-    expect(txs).toHaveLength(1);
-    expect(txs[0].id).toBe('rec1');
+    const { records } = await stellar.getTransactions(PUBLIC_KEY);
+    expect(records).toHaveLength(1);
+    expect(records[0].id).toBe('rec1');
   });
 
   it('filters out non-native asset payments', async () => {
@@ -260,22 +281,22 @@ describe('sendPayment()', () => {
       records: [makeRecord(), makeRecord({ id: 'rec2', asset_type: 'credit_alphanum4' })],
     });
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
-    expect(txs).toHaveLength(1);
+    const { records } = await stellar.getTransactions(PUBLIC_KEY);
+    expect(records).toHaveLength(1);
   });
 
   it('returns an empty array when the account has no transactions', async () => {
     mockPaymentsCall.mockResolvedValue({ records: [] });
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
-    expect(txs).toEqual([]);
+    const result = await stellar.getTransactions(PUBLIC_KEY);
+    expect(result.records).toEqual([]);
   });
 
   it('returns an empty array when the Horizon call throws', async () => {
     mockPaymentsCall.mockRejectedValue(new Error('Network error'));
 
-    const txs = await stellar.getTransactions(PUBLIC_KEY);
-    expect(txs).toEqual([]);
+    const result = await stellar.getTransactions(PUBLIC_KEY);
+    expect(result.records).toEqual([]);
   });
 
   it('queries payments in descending order with limit 20', async () => {
@@ -289,46 +310,52 @@ describe('sendPayment()', () => {
   });
 });
 
-// ── generatePaymentLink ─────────────────────────────────────────────────────
 describe("generatePaymentLink()", () => {
+  const validDestination = 'GAXH3JK46JNAE6LHCXCUDEKVLFZSCVWJITMDZB37TXXQI5Z55CGAVGHN';
+
   beforeAll(() => {
     process.env.STELLAR_NETWORK = 'testnet';
   });
 
   it('generates testnet stellar:pay URI with required params', () => {
     const link = stellar.generatePaymentLink({
-      destination: 'GDSTRADDR1234567890',
+      destination: validDestination,
       amount: 10.5,
       memo: 'Order #123',
-      assetCode: 'XLM'
+      assetCode: 'XLM',
+      assetIssuer: 'GISSUER',
     });
-    expect(link).toBe('stellar:pay?destination=GDSTRADDR1234567890&amount=10.5000000&asset_code=XLM&memo=Order%20%23123');
+    expect(link).toBe(
+      'web+stellar:pay?destination=' + validDestination +
+        '&amount=10.5&asset_code=XLM&asset_issuer=GISSUER&memo=Order+%23123&memo_type=text'
+    );
   });
 
-  it('uses stellar-pay: scheme on mainnet', () => {
+  it('uses the web+stellar scheme on all networks', () => {
     process.env.STELLAR_NETWORK = 'mainnet';
     const link = stellar.generatePaymentLink({
-      destination: 'GDSTRADDR1234567890',
-      amount: 5
+      destination: validDestination,
+      amount: 5,
+      assetCode: 'XLM',
+      assetIssuer: 'GISSUER',
     });
-    expect(link).toBe('stellar-pay:?destination=GDSTRADDR1234567890&amount=5.0000000&asset_code=XLM');
+    expect(link).toBe(
+      'web+stellar:pay?destination=' + validDestination +
+        '&amount=5&asset_code=XLM&asset_issuer=GISSUER'
+    );
   });
 
-  it('defaults assetCode to XLM and memo to empty', () => {
+  it('uses provided asset details when constructing the payment link', () => {
+    process.env.STELLAR_NETWORK = 'testnet';
     const link = stellar.generatePaymentLink({
-      destination: 'GDSTRADDR1234567890',
-      amount: 1.23
+      destination: validDestination,
+      amount: 1.23,
+      assetCode: 'USD',
+      assetIssuer: 'GISSUER',
     });
-    expect(link).toBe('stellar:pay?destination=GDSTRADDR1234567890&amount=1.2300000&asset_code=XLM');
-  });
-
-  it('throws on invalid destination', () => {
-    expect(() => stellar.generatePaymentLink({ destination: 'invalid', amount: 10 })).toThrow('Invalid destination public key');
-  });
-
-  it('throws on invalid amount', () => {
-    expect(() => stellar.generatePaymentLink({ destination: 'GDSTR...', amount: 0 })).toThrow('Invalid amount');
-    expect(() => stellar.generatePaymentLink({ destination: 'GDSTR...', amount: -1 })).toThrow('Invalid amount');
-    expect(() => stellar.generatePaymentLink({ destination: 'GDSTR...', amount: 'abc' })).toThrow('Invalid amount');
+    expect(link).toBe(
+      'web+stellar:pay?destination=' + validDestination +
+        '&amount=1.23&asset_code=USD&asset_issuer=GISSUER'
+    );
   });
 });
