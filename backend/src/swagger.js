@@ -1,4 +1,5 @@
 const swaggerJsdoc = require('swagger-jsdoc');
+const { buildSpaPaths } = require('./openapi/spaPaths');
 
 const options = {
   definition: {
@@ -90,4 +91,12 @@ const options = {
   apis: ['./src/routes/*.js'],
 };
 
-module.exports = swaggerJsdoc(options);
+const spec = swaggerJsdoc(options);
+
+// Document every endpoint the SPA calls (#1368). JSDoc definitions win where both exist.
+spec.paths = spec.paths || {};
+for (const [path, operations] of Object.entries(buildSpaPaths())) {
+  spec.paths[path] = { ...operations, ...(spec.paths[path] || {}) };
+}
+
+module.exports = spec;

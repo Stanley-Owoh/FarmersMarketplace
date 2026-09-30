@@ -673,8 +673,9 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -925,6 +926,76 @@ router.post('/:id/refund', auth, async (req, res) => {
   } catch (e) {
     return res.status(402).json({ success: false, message: 'Refund failed: ' + e.message, code: 'refund_failed' });
   }
+});
+
+// Loads an order owned (through its product) by the calling farmer, or null.
+async function getFarmerOrder(orderId, farmerId) {
+  const { rows } = await db.query(
+    `SELECT o.*, p.is_preorder, p.preorder_delivery_date
+     FROM orders o JOIN products p ON o.product_id = p.id
+     WHERE o.id = $1 AND p.farmer_id = $2`,
+    [orderId, farmerId]
+  );
+  return rows[0] || null;
+}
+
+// Claims a classic Stellar claimable balance held for an order and marks it claimed.
+async function claimOrderBalance(res, order, farmerId, message) {
+  if (String(order.escrow_balance_id || '').startsWith('soroban:')) {
+    return err(res, 400, 'Soroban escrow is released by the buyer, not claimed', 'invalid_state');
+  }
+  const { rows } = await db.query('SELECT stellar_secret_key FROM users WHERE id = $1', [farmerId]);
+  try {
+    const txHash = await claimBalance({
+      claimantSecret: rows[0].stellar_secret_key,
+      balanceId: order.escrow_balance_id,
+    });
+    await db.query('UPDATE orders SET escrow_status = $1, stellar_tx_hash = $2 WHERE id = $3', [
+      'claimed',
+      txHash,
+      order.id,
+    ]);
+    return res.json({ success: true, txHash, ...(message && { message }) });
+  } catch (e) {
+    return res.status(402).json({ success: false, message: 'Claim failed: ' + e.message, code: 'claim_failed' });
+  }
+}
+
+// POST /api/orders/:id/claim — farmer claims escrow after delivery
+router.post('/:id/claim', auth, async (req, res) => {
+  if (req.user.role !== 'farmer') return err(res, 403, 'Only farmers can claim escrow', 'forbidden');
+
+  const order = await getFarmerOrder(req.params.id, req.user.id);
+  if (!order) return err(res, 404, 'Order not found or not yours', 'not_found');
+  if (order.escrow_status !== 'funded' || !order.escrow_balance_id) {
+    return err(res, 400, 'No funded escrow on this order', 'invalid_state');
+  }
+  if (order.status !== 'delivered') {
+    return err(res, 400, 'Order must be marked delivered before claiming', 'invalid_state');
+  }
+
+  return claimOrderBalance(res, order, req.user.id);
+});
+
+// POST /api/orders/:id/claim-preorder — farmer claims a pre-order hold on/after the delivery date
+router.post('/:id/claim-preorder', auth, async (req, res) => {
+  if (req.user.role !== 'farmer') {
+    return err(res, 403, 'Only farmers can claim pre-order payments', 'forbidden');
+  }
+
+  const order = await getFarmerOrder(req.params.id, req.user.id);
+  if (!order) return err(res, 404, 'Order not found or not yours', 'not_found');
+  if (!order.is_preorder) return err(res, 400, 'Order is not a pre-order', 'invalid_state');
+  if (!order.preorder_delivery_date) return err(res, 400, 'Pre-order delivery date is missing', 'invalid_state');
+  if (order.escrow_status !== 'funded' || !order.escrow_balance_id) {
+    return err(res, 400, 'No pre-order claimable balance available', 'invalid_state');
+  }
+  const unlockAtUnix = parsePreorderUnlockUnix(order.preorder_delivery_date);
+  if (!unlockAtUnix || unlockAtUnix > Math.floor(Date.now() / 1000)) {
+    return err(res, 400, 'Cannot claim before delivery date', 'preorder_not_deliverable');
+  }
+
+  return claimOrderBalance(res, order, req.user.id, 'Pre-order payment claimed');
 });
 
 // GET /api/orders/:id/payment-link — returns a SEP-0007 URI for the order

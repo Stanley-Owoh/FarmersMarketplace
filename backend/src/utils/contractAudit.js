@@ -1,5 +1,5 @@
 /**
- * jobs/contractAudit.js
+ * utils/contractAudit.js
  *
  * Records an audit row in contract_invocations for every Soroban contract call the
  * backend makes (escrow deposit/release/refund/dispute, carbon offset, reward mints).

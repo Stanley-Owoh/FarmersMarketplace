@@ -27,26 +27,49 @@ function getCsrfToken() {
   return match ? match.trim().split('=')[1] : null;
 }
 
+// The backend serves the token at /api/v1/auth/csrf-token (and /api/csrf-token);
+// there is no /api/v1/csrf-token (#1380).
+export const CSRF_TOKEN_URL = `${BASE}/auth/csrf-token`;
+
 let csrfReady = null;
-function ensureCsrfToken() {
-  if (getCsrfToken()) return Promise.resolve();
+/**
+ * Makes sure the csrf_token cookie exists, fetching a fresh one when it is
+ * missing (or always, with `force`). Throws a descriptive error when the
+ * endpoint fails or doesn't set the cookie, instead of letting the next
+ * mutation go out without X-CSRF-Token and die with a bare 403.
+ */
+export function ensureCsrfToken({ force = false } = {}) {
+  if (!force && getCsrfToken()) return Promise.resolve();
   if (!csrfReady) {
-    csrfReady = fetch(`${BASE}/csrf-token`, {
-      credentials: 'include',
-    })
-      .then(() => null)
-      .catch(() => null)
-      .finally(() => {
-        csrfReady = null;
-      });
+    csrfReady = (async () => {
+      let res;
+      try {
+        res = await fetch(`${BASE}/auth/csrf-token`, { credentials: 'include' });
+      } catch (e) {
+        throw new Error(`Could not fetch a CSRF token: ${e.message}`);
+      }
+      if (!res.ok) {
+        throw new Error(`Could not fetch a CSRF token: ${CSRF_TOKEN_URL} returned HTTP ${res.status}`);
+      }
+      if (!getCsrfToken()) {
+        throw new Error(`Could not fetch a CSRF token: ${CSRF_TOKEN_URL} did not set the csrf_token cookie`);
+      }
+    })().finally(() => {
+      csrfReady = null;
+    });
   }
   return csrfReady;
 }
 
 async function refreshAccessToken() {
+  // The refresh endpoint is CSRF-protected on the backend, so it needs the header too.
+  // Best effort: if the token can't be fetched, the refresh call reports the failure.
+  await ensureCsrfToken().catch(() => {});
+  const csrfToken = getCsrfToken();
   const res = await fetch(`${BASE}/auth/refresh`, {
     method: 'POST',
     credentials: 'include',
+    headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
   });
   if (!res.ok) return null;
   const data = await res.json();
@@ -55,9 +78,14 @@ async function refreshAccessToken() {
 }
 
 const MUTATING = ['POST', 'PUT', 'PATCH', 'DELETE'];
-const CSRF_EXEMPT = ['/auth/login', '/auth/register', '/auth/refresh'];
+// Must match EXEMPT_SUFFIXES in backend/src/middleware/csrf.js.
+export const CSRF_EXEMPT = ['/auth/login', '/auth/register', '/auth/recover'];
 
-async function request(path, options = {}, retry = true) {
+function isCsrfFailure(status, data) {
+  return status === 403 && /csrf token (missing|invalid)/i.test(String(data?.error || data?.message || ''));
+}
+
+async function request(path, options = {}, retry = true, csrfRetry = true) {
   const method = (options.method || 'GET').toUpperCase();
   const needsCsrf = MUTATING.includes(method) && !CSRF_EXEMPT.includes(path);
 
@@ -88,13 +116,18 @@ async function request(path, options = {}, retry = true) {
       } catch {
         token = null;
       }
-      if (token) return request(path, options, false);
+      if (token) return request(path, options, false, csrfRetry);
       clearAccessToken();
       if (logoutCallback) logoutCallback();
       throw new Error('Session expired');
     }
 
     const data = await res.json().catch(() => ({}));
+    if (needsCsrf && csrfRetry && isCsrfFailure(res.status, data)) {
+      // Cookie expired or was rotated elsewhere: fetch a fresh token once and retry.
+      await ensureCsrfToken({ force: true });
+      return request(path, options, retry, false);
+    }
     if (!res.ok) {
       const err = new Error(data.message || data.error || 'Request failed');
       err.code = data.code;
@@ -105,6 +138,25 @@ async function request(path, options = {}, retry = true) {
   } finally {
     if (loadingCallback) loadingCallback(false);
   }
+}
+
+/** UUID v4 for X-Idempotency-Key (backend requires v4, #1379). */
+export function newIdempotencyKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+function requireIdempotencyKey(idempotencyKey) {
+  if (idempotencyKey) return idempotencyKey;
+  const msg = 'placeOrder requires an idempotency key: generate one per checkout attempt and reuse it for retries';
+  if (import.meta.env?.DEV) throw new Error(msg);
+  // eslint-disable-next-line no-console
+  console.warn(msg);
+  return newIdempotencyKey();
 }
 
 function toQs(params = {}) {
@@ -181,7 +233,7 @@ export const api = {
     request('/orders', {
       method: 'POST',
       body,
-      headers: idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {},
+      headers: { 'X-Idempotency-Key': requireIdempotencyKey(idempotencyKey) },
     }),
   getOrders: (params = {}) => request(`/orders${toQs(params)}`),
   getSales: (params = {}) => request(`/orders/sales${toQs(params)}`),
@@ -336,7 +388,13 @@ export const api = {
 
   getAddresses: () => request('/addresses'),
 
-  placeOrderWithBudgetOverride: (body) => request('/orders', { method: 'POST', body: { ...body, budget_override_confirmed: true } }),
+  // Reuse the original attempt's key so the confirmed retry is the same order (#1379).
+  placeOrderWithBudgetOverride: (body, idempotencyKey) =>
+    request('/orders', {
+      method: 'POST',
+      body: { ...body, budget_override_confirmed: true },
+      headers: { 'X-Idempotency-Key': requireIdempotencyKey(idempotencyKey) },
+    }),
   getOrderStatus: (id) => request(`/orders/${id}/status`),
   getOrderPaymentLinkQr: (orderId) => `/api/orders/${orderId}/payment-link/qr`,
 

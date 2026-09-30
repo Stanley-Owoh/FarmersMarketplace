@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from 
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useIdempotencyKey } from '../hooks/useIdempotencyKey';
 import { useFavorites } from '../context/FavoritesContext';
 import { getStellarErrorMessage } from '../utils/stellarErrors';
 import { getErrorMessage } from '../utils/errorMessages';
@@ -119,6 +120,8 @@ export default function ProductDetail() {
   const { t } = useTranslation();
   const { id } = useParams();
   const { user } = useAuth();
+  const buyAttempt = useIdempotencyKey();
+  const walletAttempt = useIdempotencyKey();
   const { isFavorited, toggleFavorite } = useFavorites();
   const navigate = useNavigate();
   const [product, setProduct] = useState(null);
@@ -607,21 +610,25 @@ export default function ProductDetail() {
     }
     if (sourceAsset && pathEstimateError) return setError(pathEstimateError);
     if (sourceAsset && !pathEstimate) return setError('Waiting for path estimate...');
+    const orderBody = {
+      product_id: product.id,
+      quantity: qty,
+      address_id: selectedAddressId || undefined,
+      use_soroban_escrow: useEscrow,
+      coupon_code: couponResult ? couponCode.trim() : undefined,
+      source_asset: sourceAsset ? { code: sourceAsset.asset_code, issuer: sourceAsset.asset_issuer } : undefined,
+      weight: product.pricing_type === 'weight' ? parseFloat(weight) : undefined,
+      custom_price: (product.pricing_model === 'pwyw' || product.pricing_model === 'donation') ? parseFloat(customPrice) : undefined,
+    };
+    const idempotencyKey = buyAttempt.keyFor(orderBody);
     setLoading(true);
     setError('');
     try {
-      const res = await api.placeOrder({
-        product_id: product.id,
-        quantity: qty,
-        address_id: selectedAddressId || undefined,
-        use_soroban_escrow: useEscrow,
-        coupon_code: couponResult ? couponCode.trim() : undefined,
-        source_asset: sourceAsset ? { code: sourceAsset.asset_code, issuer: sourceAsset.asset_issuer } : undefined,
-        weight: product.pricing_type === 'weight' ? parseFloat(weight) : undefined,
-        custom_price: (product.pricing_model === 'pwyw' || product.pricing_model === 'donation') ? parseFloat(customPrice) : undefined,
-      });
+      const res = await api.placeOrder(orderBody, idempotencyKey);
+      buyAttempt.settle();
       setResult({ ...res, escrow: useEscrow });
     } catch (e) {
+      buyAttempt.settle(e);
       const msg = getStellarErrorMessage(e) || getErrorMessage(e);
       setError(msg);
       showToast(msg, 'error');
@@ -641,14 +648,23 @@ export default function ProductDetail() {
       walletPollingTimeoutRef.current = null;
     }
 
+    const orderBody = {
+      product_id: product.id,
+      quantity: qty,
+      address_id: selectedAddressId || undefined,
+      coupon_code: couponResult ? couponCode.trim() : undefined,
+    };
+    const idempotencyKey = walletAttempt.keyFor(orderBody);
     setWalletLoading(true);
     try {
-      const orderRes = await api.placeOrder({
-        product_id: product.id,
-        quantity: qty,
-        address_id: selectedAddressId || undefined,
-        coupon_code: couponResult ? couponCode.trim() : undefined,
-      });
+      let orderRes;
+      try {
+        orderRes = await api.placeOrder(orderBody, idempotencyKey);
+        walletAttempt.settle();
+      } catch (e) {
+        walletAttempt.settle(e);
+        throw e;
+      }
       const linkRes = await api.getOrderPaymentLink(orderRes.orderId);
       setWalletOrderId(orderRes.orderId);
       setPaymentLink(linkRes.paymentLink);

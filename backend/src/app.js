@@ -114,12 +114,6 @@ app.use(require('./routes'));
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Start background jobs (skip in test to avoid open handles)
-if (process.env.NODE_ENV !== 'test') {
-  const { startActivityMonitor } = require('./jobs/activityMonitor');
-  startActivityMonitor();
-  const { startOrphanedUploadsCleanupJob } = require('./jobs/reconcileOrphanedUploads');
-  startOrphanedUploadsCleanupJob();
-}
+// Background jobs are started from src/index.js via jobs/index.js (#1367), never on import.
 
 module.exports = app;

@@ -261,6 +261,14 @@ async function monitorContract(contractId, retryCount = 0) {
         }).catch(() => {});
       }
     } catch { /* non-fatal */ }
+
+    // Record the alert for the admin dashboard (non-fatal)
+    try {
+      await db.query(
+        `INSERT INTO contract_alerts (contract_id, alert_type, severity, message) VALUES ($1, $2, $3, $4)`,
+        [contractId, 'monitor_failure', 'critical', `Failed to fetch events after ${MAX_RETRIES} retries: ${err.message}`]
+      );
+    } catch { /* non-fatal */ }
     return;
   }
 
@@ -312,5 +320,5 @@ module.exports = {
   _handlers: { handleDeposit, handleRelease, handleRefund, handleDispute, dispatchEvent },
   _cursor: { getLastLedger, saveLastLedger },
   // Re-export audit functions from contractAudit module
-  ...require('./contractAudit'),
+  ...require('../utils/contractAudit'),
 };
