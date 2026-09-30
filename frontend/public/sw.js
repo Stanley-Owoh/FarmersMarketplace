@@ -3,11 +3,11 @@ const CACHE_NAME = `fm-shell-${APP_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
 const PRECACHE_URLS = [
-  '/',
   '/offline.html',
 ];
 
-// Install: pre-cache app shell
+// Install: pre-cache the offline fallback only. index.html is intentionally
+// NOT pre-cached so navigation always goes to the network when online.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
@@ -45,12 +45,22 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Navigation requests: cache-first, fallback to offline.html
+  // Navigation requests: network-first so a fresh deploy always serves the
+  // new index.html (and its hashed chunks). Fall back to the cached shell
+  // only when the network is unavailable.
   if (request.mode === 'navigate') {
     event.respondWith(
-      caches.match(request)
-        .then((cached) => cached || fetch(request))
-        .catch(() => caches.match(OFFLINE_URL))
+      fetch(request)
+        .then((response) => {
+          if (response.ok && request.method === 'GET') {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() =>
+          caches.match(request).then((cached) => cached || caches.match(OFFLINE_URL))
+        )
     );
     return;
   }
