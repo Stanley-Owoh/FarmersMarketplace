@@ -6,6 +6,7 @@ import Spinner from '../components/Spinner';
 import { getStellarErrorMessage } from '../utils/stellarErrors';
 import { getErrorMessage } from '../utils/errorMessages';
 import { showToast } from '../utils/toast';
+import { useConfirm } from '../hooks/useConfirm';
 import { useTranslation } from 'react-i18next';
 import StreamAccrual from '../components/StreamAccrual';
 import { useXlmRate } from '../utils/useXlmRate';
@@ -76,6 +77,7 @@ function Toast({ toasts, usd }) {
 
 export default function Wallet() {
   const { t } = useTranslation();
+  const { confirm, confirmDialog } = useConfirm();
   const { user } = useAuth();
   const { usd } = useXlmRate();
   const [disclaimerVisible, setDisclaimerVisible] = useState(() => localStorage.getItem(DISCLAIMER_KEY) !== 'true');
@@ -314,7 +316,13 @@ export default function Wallet() {
   }
 
   async function handleRemoveTrustline(assetCode, assetIssuer) {
-    if (!confirm('Remove trustline for ' + assetCode + '? You must have a zero balance.')) return;
+    const ok = await confirm({
+      title: 'Remove trustline for ' + assetCode + '?',
+      description: 'You must have a zero balance of this asset before removing its trustline.',
+      confirmLabel: 'Remove trustline',
+      destructive: true,
+    });
+    if (!ok) return;
     setRemovingAsset(assetCode);
     setTlMsg(null);
     try {
@@ -939,6 +947,7 @@ export default function Wallet() {
       </div>
         </>
       )}
+      {confirmDialog}
     </div>
   );
 }

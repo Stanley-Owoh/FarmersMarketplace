@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
+import { useConfirm } from '../hooks/useConfirm';
 import AdminAnalyticsSummary from '../components/admin/AdminAnalyticsSummary';
 import AdminUsersPanel from '../components/admin/AdminUsersPanel';
 import AdminOrdersPanel from '../components/admin/AdminOrdersPanel';
@@ -172,6 +173,7 @@ const s = {
 
 export default function AdminDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { confirm, confirmDialog } = useConfirm();
   const [stats, setStats] = useState(null);
   const [users, setUsers] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
@@ -366,7 +368,13 @@ export default function AdminDashboard() {
   }
 
   async function handleDeregisterContract(id) {
-    if (!confirm('Deregister this contract?')) return;
+    const ok = await confirm({
+      title: 'Deregister this contract?',
+      description: 'It will be removed from the contract registry.',
+      confirmLabel: 'Deregister',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await api.adminDeregisterContract(id);
       loadContracts();
@@ -978,8 +986,8 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {contractState.map((entry, i) => (
-                      <tr key={i}>
+                    {contractState.map((entry) => (
+                      <tr key={`${entry.durability}-${String(entry.key)}`}>
                         <td style={{ ...s.td, fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}>{String(entry.key)}</td>
                         <td style={{ ...s.td, fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}>{JSON.stringify(entry.val)}</td>
                         <td style={{ ...s.td, fontSize: 12 }}>
@@ -1183,7 +1191,13 @@ export default function AdminDashboard() {
                         <button
                           style={{ padding: '3px 10px', borderRadius: 6, border: 'none', background: '#fee', color: '#c0392b', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
                           onClick={async () => {
-                            if (!confirm(`Revoke access for ${entry.address}?`)) return;
+                            const ok = await confirm({
+                              title: 'Revoke contract access?',
+                              description: `${entry.address} will lose its ${entry.role} role.`,
+                              confirmLabel: 'Revoke',
+                              destructive: true,
+                            });
+                            if (!ok) return;
                             try {
                               await api.adminRevokeContractAcl(aclRegistryId, entry.address);
                               const res = await api.adminGetContractAcl(aclRegistryId);
@@ -1438,6 +1452,7 @@ export default function AdminDashboard() {
       </div>
       {/* Announcements Management */}
       <AdminAnnouncementsPanel />
+      {confirmDialog}
     </div>
   );
 }
