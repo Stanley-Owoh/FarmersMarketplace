@@ -2,7 +2,7 @@ const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const logger = require('../logger');
 const db = require('../db/schema');
-const { Server } = require('@stellar/stellar-sdk');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 // ============================================================================
 // Rate Limiters
@@ -92,7 +92,7 @@ async function checkStellarHorizon(requestId) {
       (process.env.STELLAR_NETWORK === 'mainnet' 
         ? 'https://horizon.stellar.org' 
         : 'https://horizon-testnet.stellar.org');
-    const server = new Server(horizonUrl);
+    const server = new StellarSdk.Horizon.Server(horizonUrl);
     await server.root();
     const duration = Date.now() - startTime;
     logger.info(JSON.stringify({ requestId: requestId || null, event: 'horizon_health_check', status: 'ok', responseTime: `${duration}ms` }));
@@ -295,7 +295,6 @@ router.get('/api/v1/health', async (req, res) => {
 // ============================================================================
 
 router.use('/api', generalLimiter);
-router.use('/api/v1', generalLimiter);
 router.use('/api/auth/login', authLimiter);
 router.use('/api/auth/register', authLimiter);
 router.use('/api/auth/refresh', authLimiter);
@@ -345,6 +344,8 @@ router.use('/federation', require('./federation'));
 
 // API Routes - registered for both /api and /api/v1
 registerRoute('/', '/auth', require('./auth'));
+registerRoute('/', '/auth', require('./emailVerification'));
+registerRoute('/', '/auth', require('./authPasswordReset'));
 registerRoute('/', '/products', require('./products'));
 registerRoute('/', '/orders', require('./orderBudgetGuard'));
 registerRoute('/', '/orders', require('./orders'));
@@ -373,7 +374,10 @@ registerRoute('/', '/products/bulk', require('./bulkUpload'));
 registerRoute('/', '/coupons', require('./coupons'));
 registerRoute('/', '/alerts', require('./alerts'));
 registerRoute('/', '/products/import', require('./productImport'));
-registerRoute('/', '', require('./reviews'));
+const reviewRoutes = require('./reviews');
+registerRoute('/', '/reviews', reviewRoutes);
+registerRoute('/', '/admin/reviews', reviewRoutes.adminRouter);
+registerRoute('/', '/products', reviewRoutes.productRouter);
 registerRoute('/', '/network', require('./network'));
 registerRoute('/', '/batches', require('./batches'));
 registerRoute('/', '/products/flashSales', require('./flashSales'));
@@ -387,7 +391,9 @@ registerRoute('/', '/market', require('./market'));
 registerRoute('/', '/subscriptions', require('./subscriptions').router);
 registerRoute('/', '/bundles', require('./bundles'));
 registerRoute('/', '/farmers/bundles', require('./bundleDiscounts'));
-registerRoute('/', '', require('./export'));
+const exportRoutes = require('./export');
+registerRoute('/', '/products', exportRoutes.productsRouter);
+registerRoute('/', '/orders', exportRoutes.ordersRouter);
 registerRoute('/', '/announcements', require('./announcements'));
 registerRoute('/', '/auctions', require('./auctions'));
 registerRoute('/', '/disputes', require('./disputes'));

@@ -92,6 +92,8 @@ jest.mock('../src/utils/geocheck', () => ({
 }));
 jest.mock('../src/utils/idempotency', () => ({
   getCachedResponse: jest.fn().mockReturnValue(null),
+  claimIdempotencyKey: jest.fn().mockResolvedValue({ status: 'claimed' }),
+  releaseIdempotencyKey: jest.fn().mockResolvedValue(undefined),
   cacheResponse: jest.fn(),
 }));
 jest.mock('../src/services/AutomaticOrderProcessor', () =>
@@ -129,6 +131,7 @@ jest.mock('../src/routes', () => {
   router.use('/api/products', require('../src/routes/products'));
   router.use('/api/orders', require('../src/routes/orders'));
   router.use('/api/orders/:id/return', require('../src/routes/returns'));
+  router.use('/api', require('../src/routes/reviews'));
   router.use('/api/disputes', require('../src/routes/disputes'));
   router.use('/api/analytics', require('../src/routes/analytics'));
   router.use('/api/notifications', require('../src/routes/notifications'));

@@ -12,6 +12,12 @@ const PENDING_ADMIN: Symbol = symbol_short!("PEND_ADM");
 const BUMP_THRESHOLD: u32 = 100_000;
 const BUMP_AMOUNT: u32 = 500_000;
 
+// Instance TTL bounds: ~6 days threshold, ~30 days bump. Instance storage holds
+// the admin config, so every state-changing entrypoint must extend it to avoid
+// the config being archived on a quiet deployment.
+const TTL_MIN: u32 = 100_000;
+const TTL_MAX: u32 = 500_000;
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -39,6 +45,11 @@ pub struct CarbonOffset {
 
 #[contract]
 pub struct CarbonOffsetContract;
+
+/// Extend the instance storage TTL so admin/config data is never archived.
+fn bump_instance(env: &Env) {
+    env.storage().instance().extend_ttl(TTL_MIN, TTL_MAX);
+}
 
 #[contractimpl]
 impl CarbonOffsetContract {
@@ -83,6 +94,7 @@ impl CarbonOffsetContract {
             (symbol_short!("carbon"), symbol_short!("verify")),
             (order_id, kg_co2, verifier),
         );
+        bump_instance(&env);
     }
 
     /// Record a verified carbon offset for `order_id`. Callable only by the platform admin.
@@ -141,6 +153,8 @@ impl CarbonOffsetContract {
                 (order_id, previous.kg_co2, kg_co2, record.verifier.clone()),
             );
         }
+
+        bump_instance(&env);
 
         env.events().publish(
             (symbol_short!("carbon"), symbol_short!("offset")),
@@ -237,6 +251,7 @@ impl CarbonOffsetContract {
             (symbol_short!("admin"), symbol_short!("proposed")),
             new_admin,
         );
+        bump_instance(&env);
     }
 
     /// Complete an admin transfer. Only the proposed address may accept.
@@ -254,6 +269,7 @@ impl CarbonOffsetContract {
             (symbol_short!("admin"), symbol_short!("accepted")),
             pending,
         );
+        bump_instance(&env);
     }
 
     /// Replace this contract's WASM. Only the current admin may upgrade.
@@ -275,13 +291,15 @@ impl CarbonOffsetContract {
                 (symbol_short!("contract"), symbol_short!("upgraded")),
                 new_wasm_hash,
             );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        bump_instance(&env);
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
 
     #[test]
     fn record_and_get_offset() {
@@ -410,5 +428,35 @@ mod test {
         client.initialize(&admin);
 
         client.upgrade(&BytesN::from_array(&env, &[0; 32]));
+    }
+
+    #[test]
+    fn instance_ttl_extended_across_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CarbonOffsetContract);
+        let client = CarbonOffsetContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let verifier = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Advance the ledger past TTL_MIN between calls; the instance config
+        // (admin) must still be readable because each entrypoint bumps the TTL.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += TTL_MIN + 1;
+        });
+
+        client.record_offset(&7, &50, &verifier);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += TTL_MIN + 1;
+        });
+
+        let record = client.get_offset(&7);
+        assert_eq!(record.order_id, 7);
+        assert_eq!(record.kg_co2, 50);
     }
 }

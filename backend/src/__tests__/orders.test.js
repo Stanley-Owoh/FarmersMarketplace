@@ -25,6 +25,7 @@ jest.mock('../middleware/auth', () => {
 
 const mockDb = jest.requireMock('../db/schema');
 const stellar = jest.requireMock('../utils/stellar');
+stellar.recordCarbonOffset = jest.fn().mockResolvedValue({});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -90,6 +91,74 @@ describe('POST /api/orders', () => {
     expect(res.body.status).toBe('paid');
     expect(res.body.txHash).toBe('FAKE_TX_HASH_ABC');
     expect(res.body.orderId).toBeDefined();
+  });
+
+  describe('PATCH /api/orders/:id/status', () => {
+    const order = {
+      id: 42,
+      buyer_id: 2,
+      status: 'paid',
+      quantity: 2,
+      product_name: 'Apples',
+      unit: 'kg',
+      category: 'fruit',
+      carbon_kg_per_unit: 0.5,
+      buyer_name: 'Test Buyer',
+      buyer_email: 'buyer@example.com',
+      buyer_stellar_address: 'GBUYER123',
+      farmer_wallet: 'GFARMER123',
+    };
+
+    it.each(['pending', 'failed', 'refunded', 'disputed', 'delivered'])(
+      'rejects delivery from an order currently %s without side effects',
+      async (currentStatus) => {
+        mockDb.query.mockResolvedValueOnce({ rows: [{ ...order, status: currentStatus }], rowCount: 1 });
+
+        const res = await request(app)
+          .patch('/api/orders/42/status')
+          .set('Authorization', `Bearer ${farmerToken}`)
+          .send({ status: 'delivered' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('invalid_status_transition');
+        expect(mockDb.query).toHaveBeenCalledTimes(1);
+        expect(stellar.recordCarbonOffset).not.toHaveBeenCalled();
+        expect(require('../utils/mailer').sendStatusUpdateEmail).not.toHaveBeenCalled();
+        expect(require('../utils/pushNotifications').sendPushToUser).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects moving a delivered order back to processing', async () => {
+      mockDb.query.mockResolvedValueOnce({ rows: [{ ...order, status: 'delivered' }], rowCount: 1 });
+
+      const res = await request(app)
+        .patch('/api/orders/42/status')
+        .set('Authorization', `Bearer ${farmerToken}`)
+        .send({ status: 'processing' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('invalid_status_transition');
+      expect(mockDb.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows delivery after shipping and records the carbon offset', async () => {
+      mockDb.query
+        .mockResolvedValueOnce({ rows: [{ ...order, status: 'shipped' }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+      const res = await request(app)
+        .patch('/api/orders/42/status')
+        .set('Authorization', `Bearer ${farmerToken}`)
+        .send({ status: 'delivered' });
+
+      expect(res.status).toBe(200);
+      expect(mockDb.query.mock.calls[1][0]).toContain('AND status = $4');
+      expect(stellar.recordCarbonOffset).toHaveBeenCalledWith({
+        orderId: 42,
+        kgCo2: 1,
+        verifierPublicKey: 'GFARMER123',
+      });
+    });
   });
 
   it('returns 403 when a farmer tries to place an order', async () => {
@@ -651,11 +720,14 @@ describe('POST /api/orders — idempotency (#802)', () => {
 
   it('replays a cached 201 response with correct status', async () => {
     const idempotency = require('../utils/idempotency');
-    jest.spyOn(idempotency, 'getCachedResponse').mockResolvedValueOnce({
-      success: true,
-      orderId: 42,
-      status: 'paid',
-      _status: 201,
+    jest.spyOn(idempotency, 'claimIdempotencyKey').mockResolvedValueOnce({
+      status: 'cached',
+      response: {
+        success: true,
+        orderId: 42,
+        status: 'paid',
+        _status: 201,
+      },
     });
 
     const res = await request(app)
@@ -668,9 +740,9 @@ describe('POST /api/orders — idempotency (#802)', () => {
     expect(res.body.orderId).toBe(42);
   });
 
-  it('returns 503 when getCachedResponse throws', async () => {
+  it('returns 503 when claiming an idempotency key throws', async () => {
     const idempotency = require('../utils/idempotency');
-    jest.spyOn(idempotency, 'getCachedResponse').mockRejectedValueOnce(new Error('Redis down'));
+    jest.spyOn(idempotency, 'claimIdempotencyKey').mockRejectedValueOnce(new Error('Database unavailable'));
 
     const res = await request(app)
       .post('/api/orders')
