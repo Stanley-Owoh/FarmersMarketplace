@@ -18,6 +18,11 @@ if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== '
 }
 
 const isTestnet = STELLAR_NETWORK === 'testnet';
+
+const horizonUrl =
+  process.env.STELLAR_HORIZON_URL ||
+  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
+
 const horizonUrl =
   process.env.STELLAR_HORIZON_URL ||
   (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
@@ -28,6 +33,9 @@ const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.N
 const server = new StellarSdk.Horizon.Server(horizonUrl);
 const sorobanServer = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
 
+// Required Soroban/escrow environment variables. Missing values cause cryptic
+// runtime failures at the contract call site, so we validate them at startup.
+// Variable names match backend/src/config.js (the typed config layer).
 const REQUIRED_STELLAR_VARS = [
   'SOROBAN_ESCROW_CONTRACT_ID',
   'SOROBAN_XLM_TOKEN_CONTRACT_ID',

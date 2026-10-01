@@ -10,6 +10,7 @@ const StellarHDWallet = require('stellar-hd-wallet');
 const config = require('../config');
 const { StellarSdk, server, networkPassphrase } = require('./stellar-config');
 const { decrypt } = require('./crypto');
+const config = require('../config');
 
 // In-memory cache: publicKey -> { federationAddress, expiresAt }
 const _federationCache = new Map();
@@ -41,6 +42,9 @@ function decryptAndDeriveKeypair(encryptedSeedPhrase) {
   }
 }
 
+// In-memory cache: publicKey -> { federationAddress, expiresAt }
+const _federationCache = new Map();
+const FEDERATION_TTL_MS = 10 * 60 * 1000;
 function createRandomKeypair() {
   if (StellarSdk.Keypair && typeof StellarSdk.Keypair.random === 'function') {
     const keypair = StellarSdk.Keypair.random();
@@ -64,6 +68,8 @@ function createWallet() {
 
 function createWalletFromMnemonic() {
   const mnemonic = bip39.generateMnemonic(256);
+  const wallet = StellarHDWallet.fromMnemonic(mnemonic);
+  const keypair = StellarSdk.Keypair.fromSecret(wallet.getSecret(0));
   const wallet = StellarHDWallet && typeof StellarHDWallet.fromMnemonic === 'function'
     ? StellarHDWallet.fromMnemonic(mnemonic)
     : { getSecret: () => crypto.randomBytes(32).toString('hex') };
@@ -200,6 +206,9 @@ class FederationError extends Error {
   }
 }
 
+const _resolveCache = new Map();
+const RESOLVE_TTL_MS = 5 * 60 * 1000;
+
 async function resolveFederationAddress(address, db) {
   if (!address || !address.includes('*')) return { publicKey: address, memo: null };
 
@@ -230,7 +239,9 @@ async function resolveFederationAddress(address, db) {
     } catch (e) {
       throw new FederationError(`Could not reach federation server for "${address}": ${e.message}`, 'federation_unreachable');
     }
-    if (!record.account_id) throw new FederationError('No account_id in federation response', 'federation_unreachable');
+    if (!record.account_id) {
+      throw new FederationError('No account_id in federation response', 'federation_unreachable');
+    }
     publicKey = record.account_id;
     memo = record.memo || null;
   }
@@ -249,6 +260,7 @@ async function resolveFederationAddress(address, db) {
 }
 
 module.exports = {
+  FederationError,
   decryptAndDeriveKeypair,
   createWallet,
   createWalletFromMnemonic,
