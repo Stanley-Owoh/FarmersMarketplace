@@ -1,8 +1,18 @@
-const router = require('express').Router();
+const express = require('express');
 const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
+const validate = require('../middleware/validate');
+const { sanitizeText } = require('../utils/sanitize');
 
+const router = express.Router();
+const adminRouter = express.Router();
+const productRouter = express.Router();
+
+async function recalcRating(productId) {
+  const { rows } = await db.query(
+    `SELECT ROUND(AVG(rating), 2) AS avg, COUNT(*) AS cnt
+     FROM reviews WHERE product_id = $1 AND status = 'approved'`,
 // Ensure avg_rating and review_count exist on products
 db.query('ALTER TABLE products ADD COLUMN avg_rating REAL DEFAULT 0').catch(() => { /* column may already exist */ });
 db.query('ALTER TABLE products ADD COLUMN review_count INTEGER DEFAULT 0').catch(() => { /* column may already exist */ });
@@ -21,6 +31,12 @@ async function recalcRating(productId) {
   ]);
 }
 
+router.get('/:productId', async (req, res) => {
+  const { rows } = await db.query(
+    `SELECT r.id, r.rating, r.comment AS body, r.created_at, u.name AS buyer_name
+     FROM reviews r JOIN users u ON r.buyer_id = u.id
+     WHERE r.product_id = $1 AND r.status = 'approved'
+     ORDER BY r.created_at DESC`,
 // GET /api/reviews/:productId - approved reviews only (public)
 router.get('/reviews/:productId', (req, res) => {
   const rows = db.prepare(`
@@ -36,6 +52,10 @@ router.get('/:productId', async (req, res) => {
   res.json({ success: true, data: rows });
 });
 
+adminRouter.patch('/:id/approve', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
+  const { rows } = await db.query('SELECT * FROM reviews WHERE id = $1', [req.params.id]);
+  const review = rows[0];
 // PATCH /api/admin/reviews/:id/approve - admin moderation
 router.patch('/admin/reviews/:id/approve', auth, async (req, res) => {
   if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
@@ -47,6 +67,10 @@ router.patch('/admin/reviews/:id/approve', auth, async (req, res) => {
   res.json({ success: true, message: 'Review approved' });
 });
 
+adminRouter.patch('/:id/reject', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
+  const { rows } = await db.query('SELECT * FROM reviews WHERE id = $1', [req.params.id]);
+  const review = rows[0];
 // PATCH /api/admin/reviews/:id/reject - admin moderation
 router.patch('/admin/reviews/:id/reject', auth, async (req, res) => {
   if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
@@ -58,6 +82,15 @@ router.patch('/admin/reviews/:id/reject', auth, async (req, res) => {
   res.json({ success: true, message: 'Review rejected' });
 });
 
+adminRouter.get('/pending', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
+  const { rows } = await db.query(
+    `SELECT r.*, u.name AS buyer_name, p.name AS product_name
+     FROM reviews r
+     JOIN users u ON r.buyer_id = u.id
+     JOIN products p ON r.product_id = p.id
+     WHERE r.status = 'pending'
+     ORDER BY r.created_at ASC`
 // GET /api/admin/reviews/pending - list pending reviews for admin
 router.get('/admin/reviews/pending', auth, async (req, res) => {
   if (req.user.role !== 'admin') return err(res, 403, 'Admins only', 'forbidden');
@@ -72,6 +105,14 @@ router.get('/admin/reviews/pending', auth, async (req, res) => {
   res.json({ success: true, data: rows });
 });
 
+router.delete('/:id', auth, async (req, res) => {
+  const { rows } = await db.query('SELECT * FROM reviews WHERE id = $1 AND buyer_id = $2', [
+    req.params.id,
+    req.user.id,
+  ]);
+  const review = rows[0];
+  if (!review) return err(res, 404, 'Review not found or not yours', 'not_found');
+
 // DELETE /api/reviews/:id - buyer deletes own review
 router.delete('/reviews/:id', auth, (req, res) => {
   const review = db.prepare('SELECT * FROM reviews WHERE id = ? AND buyer_id = ?').get(req.params.id, req.user.id);
@@ -85,6 +126,17 @@ router.delete('/:id', auth, async (req, res) => {
   res.json({ success: true, message: 'Review deleted' });
 });
 
+router.post('/', auth, validate.review, async (req, res) => {
+  if (req.user.role !== 'buyer')
+    return err(res, 403, 'Only buyers can submit reviews', 'forbidden');
+
+  const productId = parseInt(req.body.product_id, 10);
+  const rating = parseInt(req.body.rating, 10);
+  const comment = req.body.comment ? sanitizeText(req.body.comment) : null;
+
+  const { rows: orderRows } = await db.query(
+    `SELECT id FROM orders WHERE buyer_id = $1 AND product_id = $2 AND status = 'paid' LIMIT 1`,
+    [req.user.id, productId]
 const validate = require('../middleware/validate');
 const { sanitizeText } = require('../utils/sanitize');
 
@@ -110,6 +162,16 @@ router.post('/reviews', auth, validate.review, async (req, res) => {
   if (!orderRows[0])
     return err(res, 403, 'Purchase required to review this product', 'purchase_required');
 
+  const { rows: existingReviews } = await db.query(
+    'SELECT id FROM reviews WHERE order_id = $1',
+    [orderRows[0].id]
+  );
+  if (existingReviews[0])
+    return err(res, 409, 'You have already reviewed this order', 'duplicate_review');
+
+  const { rows } = await db.query(
+    'INSERT INTO reviews (order_id, buyer_id, product_id, rating, comment) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+    [orderRows[0].id, req.user.id, productId, rating, comment]
   const order = orderRows[0];
   const { rows: existingReviews } = await db.query(
     'SELECT id FROM reviews WHERE order_id = $1 LIMIT 1',
@@ -125,10 +187,9 @@ router.post('/reviews', auth, validate.review, async (req, res) => {
   res.status(201).json({ success: true, id: rows[0].id, message: 'Review submitted' });
 });
 
-// GET /api/products/:id/reviews
-router.get('/products/:id/reviews', async (req, res) => {
+productRouter.get('/:id/reviews', async (req, res) => {
   const { rows } = await db.query(
-    `SELECT r.id, r.rating, r.comment, r.created_at, u.name as reviewer_name
+    `SELECT r.id, r.rating, r.comment, r.created_at, u.name AS reviewer_name
      FROM reviews r JOIN users u ON r.buyer_id = u.id
      WHERE r.product_id = $1 AND r.status = 'approved'
      ORDER BY r.created_at DESC`,
@@ -136,5 +197,8 @@ router.get('/products/:id/reviews', async (req, res) => {
   );
   res.json({ success: true, data: rows });
 });
+
+router.adminRouter = adminRouter;
+router.productRouter = productRouter;
 
 module.exports = router;

@@ -63,6 +63,9 @@ async function runMigrations(db, migrationsDir = MIGRATIONS_DIR) {
     const sqlFile = fs.existsSync(dialectFile) ? dialectFile : path.join(migrationsDir, file);
     const sql = fs.readFileSync(sqlFile, 'utf8');
     await db.exec(sql);
+    if (file === '034_reviews_schema.sql') {
+      await ensureReviewSchema(db);
+    }
     const p = db.placeholder ? db.placeholder(1) : '$1';
     await db.query(`INSERT INTO migrations (name) VALUES (${p})`, [file]);
     logger.info(`[migrate] Applied ${file}`);
@@ -73,4 +76,44 @@ async function runMigrations(db, migrationsDir = MIGRATIONS_DIR) {
   }
 }
 
-module.exports = { runMigrations, ensureMigrationsTable, getApplied, getPendingFiles };
+async function ensureReviewSchema(db) {
+  const columnsFor = async (table) => {
+    const sql = db.isPostgres
+      ? 'SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1'
+      : `SELECT name FROM pragma_table_info('${table}')`;
+    const { rows } = await db.query(sql, db.isPostgres ? [table] : []);
+    return new Set(rows.map(({ name }) => name));
+  };
+
+  const productColumns = await columnsFor('products');
+  const reviewColumns = await columnsFor('reviews');
+
+  const additions = [
+    ['products', productColumns, 'avg_rating', 'REAL DEFAULT 0'],
+    ['products', productColumns, 'review_count', 'INTEGER DEFAULT 0'],
+    ['reviews', reviewColumns, 'order_id', 'INTEGER REFERENCES orders(id) ON DELETE CASCADE'],
+    ['reviews', reviewColumns, 'comment', 'TEXT'],
+    [
+      'reviews',
+      reviewColumns,
+      'status',
+      "TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected'))",
+    ],
+  ];
+
+  for (const [table, columns, name, definition] of additions) {
+    if (!columns.has(name)) {
+      await db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    }
+  }
+
+  if (reviewColumns.has('body') && !reviewColumns.has('comment')) {
+    await db.query('UPDATE reviews SET comment = body WHERE comment IS NULL AND body IS NOT NULL');
+  }
+
+  await db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_order_id ON reviews(order_id) WHERE order_id IS NOT NULL'
+  );
+}
+
+module.exports = { runMigrations, ensureMigrationsTable, getApplied, getPendingFiles, ensureReviewSchema };

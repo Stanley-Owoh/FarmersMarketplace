@@ -745,6 +745,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
     }
+
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 }, undefined, req.user.id);
     return res.status(402).json(errorData);

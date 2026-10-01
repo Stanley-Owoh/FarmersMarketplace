@@ -18,6 +18,8 @@ const logger = require('../logger');
 const { createPerIpRateLimiter } = require('../middleware/rateLimitPerUser');
 const { csrfTokenHandler, generateCsrfToken } = require('../middleware/csrf');
 const { encrypt } = require('../utils/crypto');
+const { issueVerificationToken } = require('../services/emailVerificationService');
+const { sendVerificationEmail } = require('../services/emailService');
 
 const loginRateLimit = createPerIpRateLimiter(
   parseInt(process.env.RATE_LIMIT_LOGIN_MAX || '5', 10),
@@ -224,6 +226,16 @@ router.post('/register', registerRateLimit, validate.register, async (req, res) 
       ]
     );
     const userId = rows[0].id;
+    const verificationToken = await issueVerificationToken(userId);
+    try {
+      await sendVerificationEmail(email, verificationToken);
+    } catch (emailError) {
+      logger.error('registration verification email failed', {
+        userId,
+        error: emailError.message,
+        stack: emailError.stack,
+      });
+    }
     const accessToken = signAccessToken({ id: userId, role });
     const rawRefresh = generateRefreshToken();
     await storeRefreshToken(userId, rawRefresh);
