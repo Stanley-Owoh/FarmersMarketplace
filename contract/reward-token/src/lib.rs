@@ -30,10 +30,8 @@ pub enum DataKey {
     PendingAdmin,
     /// Vesting lock entry: maps (address, mint_ledger) → VestingEntry (#693).
     Vesting(Address, u32),
-    /// On-chain index of every mint_ledger at which `Address` received a
-    /// vesting entry. Source of truth for vested_balance()/transfer_vested()
-    /// (#1235) — never trust a caller-supplied list of mint_ledgers, since
-    /// omitting an entry would let a holder understate their locked balance.
+    /// On-chain index of active vesting entries for an address. Source of truth
+    /// for vested_balance()/transfer_vested() (#1235).
     VestingIndex(Address),
     /// Global vesting period in ledgers (#693).
     VestingPeriod,
@@ -224,20 +222,27 @@ impl RewardToken {
             let current_ledger = env.ledger().sequence();
             let unlock_ledger = current_ledger.saturating_add(vesting_period);
             let vesting_key = DataKey::Vesting(to.clone(), current_ledger);
-            let entry = VestingEntry { locked_amount: amount, unlock_ledger };
+            let (mut index, _, active_ttl) =
+                Self::prune_vesting_index(&env, &to, current_ledger);
+            let mut entry: VestingEntry = env
+                .storage()
+                .persistent()
+                .get(&vesting_key)
+                .unwrap_or(VestingEntry {
+                    locked_amount: 0,
+                    unlock_ledger,
+                });
+            entry.locked_amount += amount;
+            entry.unlock_ledger = unlock_ledger;
             env.storage().persistent().set(&vesting_key, &entry);
             // Keep the vesting entry alive at least until it unlocks.
             let ttl = vesting_period.saturating_add(Self::vesting_ttl_buffer());
             env.storage().persistent().extend_ttl(&vesting_key, ttl, ttl);
 
-            // #1235 — record this mint_ledger in the holder's own index so
-            // vested_balance()/transfer_vested() never have to trust a
-            // caller-supplied list of mint_ledgers.
-            let index_key = DataKey::VestingIndex(to.clone());
-            let mut index: Vec<u32> = env.storage().persistent().get(&index_key).unwrap_or(Vec::new(&env));
-            index.push_back(current_ledger);
-            env.storage().persistent().set(&index_key, &index);
-            env.storage().persistent().extend_ttl(&index_key, ttl, ttl);
+            if !index.contains(&current_ledger) {
+                index.push_back(current_ledger);
+            }
+            Self::store_vesting_index(&env, &to, &index, ttl.max(active_ttl));
         }
 
         env.events().publish(("mint", to.clone()), amount);
@@ -264,31 +269,67 @@ impl RewardToken {
         env.storage().instance().get(&DataKey::VestingPeriod).unwrap_or(0)
     }
 
+    fn store_vesting_index(env: &Env, id: &Address, index: &Vec<u32>, ttl: u32) {
+        let key = DataKey::VestingIndex(id.clone());
+        if index.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, index);
+            env.storage().persistent().extend_ttl(&key, ttl, ttl);
+        }
+    }
+
+    fn prune_vesting_index(env: &Env, id: &Address, current: u32) -> (Vec<u32>, i128, u32) {
+        let index_key = DataKey::VestingIndex(id.clone());
+        let mint_ledgers: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(env));
+        let mut active_ledgers = Vec::new(env);
+        let mut locked = 0_i128;
+        let mut ttl = 0_u32;
+
+        for mint_ledger in mint_ledgers.iter() {
+            if active_ledgers.contains(&mint_ledger) {
+                continue;
+            }
+
+            let vesting_key = DataKey::Vesting(id.clone(), mint_ledger);
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingEntry>(&vesting_key)
+            {
+                if current < entry.unlock_ledger {
+                    locked = locked.saturating_add(entry.locked_amount);
+                    ttl = ttl.max(
+                        entry
+                            .unlock_ledger
+                            .saturating_sub(current)
+                            .saturating_add(Self::vesting_ttl_buffer()),
+                    );
+                    active_ledgers.push_back(mint_ledger);
+                } else {
+                    env.storage().persistent().remove(&vesting_key);
+                }
+            }
+        }
+
+        Self::store_vesting_index(env, id, &active_ledgers, ttl);
+        (active_ledgers, locked, ttl)
+    }
+
     /// Returns the vested (transferable) balance for `id` at the current ledger.
     ///
-    /// Walks `id`'s own on-chain `VestingIndex` (populated by `mint()`) rather
-    /// than a caller-supplied list of mint_ledgers (#1235) — a caller-supplied
-    /// list could omit a still-locked entry and inflate the reported vested
-    /// balance, defeating the vesting mechanism.
+    /// Walks and prunes `id`'s own on-chain `VestingIndex` rather than trusting
+    /// a caller-supplied list of mint_ledgers (#1235).
     ///
     /// vested_balance = total_balance − Σ locked_amount for all unexpired entries
     pub fn vested_balance(env: Env, id: Address) -> i128 {
         let total = Self::balance(env.clone(), id.clone());
         let current = env.ledger().sequence();
-        let mint_ledgers: Vec<u32> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::VestingIndex(id.clone()))
-            .unwrap_or(Vec::new(&env));
-        let mut locked: i128 = 0;
-        for mint_ledger in mint_ledgers.iter() {
-            let key = DataKey::Vesting(id.clone(), mint_ledger);
-            if let Some(entry) = env.storage().persistent().get::<DataKey, VestingEntry>(&key) {
-                if current < entry.unlock_ledger {
-                    locked = locked.saturating_add(entry.locked_amount);
-                }
-            }
-        }
+        let (_, locked, _) = Self::prune_vesting_index(&env, &id, current);
         (total - locked).max(0)
     }
 
@@ -699,6 +740,41 @@ mod test {
         env.mock_auths(&[&minter]);
         client.mint(&user, &1000);
         assert_eq!(client.balance(&user), 1000);
+    }
+
+    #[test]
+    fn test_vesting_index_aggregates_same_ledger_and_prunes_unlocked_entries() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RewardToken);
+        let client = RewardTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let minter = Address::generate(&env);
+        let user = Address::generate(&env);
+        client.initialize(
+            &admin,
+            &minter,
+            &7,
+            &String::from_str(&env, "Farmers Reward"),
+            &String::from_str(&env, "FRT"),
+            &0,
+        );
+        env.ledger().set_sequence_number(10);
+        env.mock_auths(&[&admin, &minter]);
+        client.set_vesting_period(&5);
+        client.set_reward_rate(&10_000);
+        client.mint(&user, &100);
+        client.mint(&user, &50);
+        client.mint_for_order(&user, &100);
+        assert_eq!(client.vested_balance(&user), 100);
+
+        env.ledger().set_sequence_number(15);
+        assert_eq!(client.vested_balance(&user), 250);
+        let index_exists = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .has(&DataKey::VestingIndex(user.clone()))
+        });
+        assert!(!index_exists);
     }
 
     #[test]
