@@ -30,7 +30,16 @@ SOROBAN_CARBON_OFFSET_CONTRACT_ID=<deployed_contract_id>
 
 ## Usage
 
-The backend calls `record_offset(order_id, kg_co2, verifier)` after an order's delivery
-is confirmed, using the estimate from `backend/src/utils/carbon.js`. Only the platform
-admin address configured at `initialize` time can call `record_offset`. `get_offset` is
-public and backs `GET /api/orders/:id/carbon`.
+After delivery is confirmed, the backend first calls `authorize_offset(order_id,
+kg_co2, verifier)` signed by the farmer/verifier, then calls
+`record_offset(order_id, kg_co2, verifier)` signed by the platform admin. The
+record call requires that exact verifier approval and rejects zero kilograms.
+The returned `offset_paid` field remains false because this contract does not
+verify or process an offset payment.
+
+`get_offset` is public and returns `None` when no active record exists; it backs
+`GET /api/orders/:id/carbon` without relying on a host error for the normal
+not-found case. An admin can correct a record with `amend_offset` (which also
+requires verifier authorization), or call `void_offset` before authorizing and
+recording a replacement. Admin instance storage and persistent offset records
+have their TTL refreshed, and admin-transfer/upgrade operations emit events.

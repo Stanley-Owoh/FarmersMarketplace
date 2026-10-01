@@ -1,4 +1,5 @@
-const router = require('express').Router();
+const productsRouter = require('express').Router();
+const ordersRouter = require('express').Router();
 const { stringify } = require('csv-stringify');
 const { PassThrough } = require('stream');
 const PDFDocument = require('pdfkit');
@@ -101,7 +102,7 @@ function buildPdf(res, filename, title, columns, rows, totals) {
 }
 
 // GET /api/products/export?format=csv|pdf
-router.get('/products/export', auth, farmerOnly, async (req, res) => {
+productsRouter.get('/export', auth, farmerOnly, async (req, res) => {
   const format = (req.query.format || 'csv').toLowerCase();
   if (!['csv', 'pdf'].includes(format)) return err(res, 400, 'format must be csv or pdf', 'validation_error');
 
@@ -142,7 +143,7 @@ router.get('/products/export', auth, farmerOnly, async (req, res) => {
 });
 
 // GET /api/orders/sales/export?format=csv|pdf&from=YYYY-MM-DD&to=YYYY-MM-DD
-router.get('/orders/sales/export', auth, farmerOnly, async (req, res) => {
+ordersRouter.get('/sales/export', auth, farmerOnly, async (req, res) => {
   const format = (req.query.format || 'csv').toLowerCase();
   if (!['csv', 'pdf'].includes(format)) return err(res, 400, 'format must be csv or pdf', 'validation_error');
 
@@ -200,4 +201,4 @@ router.get('/orders/sales/export', auth, farmerOnly, async (req, res) => {
   });
 });
 
-module.exports = router;
+module.exports = { productsRouter, ordersRouter };
