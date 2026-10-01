@@ -3,6 +3,7 @@ const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
 const { sendPayment, getBalance } = require('../utils/stellar');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 // Run fn(q) atomically on Postgres; SQLite (single writer) runs statements directly.
 async function withTx(fn) {
@@ -168,7 +169,7 @@ router.post('/purchase', auth, async (req, res) => {
 
   try {
     const txHash = await sendPayment({
-      senderSecret: buyer.stellar_secret_key,
+      senderSecret: await decryptUserSecretKey(buyer.stellar_secret_key),
       receiverPublicKey: bundle.farmer_wallet,
       amount: bundle.price,
       memo: `Bundle#${orderId}`,
