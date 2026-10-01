@@ -58,7 +58,10 @@ async function runMigrations(db, migrationsDir = MIGRATIONS_DIR) {
   const pending = getPendingFiles(applied, migrationsDir);
 
   for (const file of pending) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    const dialect = db.isPostgres ? 'postgres' : 'sqlite';
+    const dialectFile = path.join(migrationsDir, `${file.slice(0, -4)}.${dialect}`);
+    const sqlFile = fs.existsSync(dialectFile) ? dialectFile : path.join(migrationsDir, file);
+    const sql = fs.readFileSync(sqlFile, 'utf8');
     await db.exec(sql);
     if (file === '034_reviews_schema.sql') {
       await ensureReviewSchema(db);
