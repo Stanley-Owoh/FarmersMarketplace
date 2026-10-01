@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { runMigrations } = require('../db/migrationRunner');
+const { runMigrations, getPendingFiles } = require('../db/migrationRunner');
 
 describe('migration runner failure recovery', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'migrations-'));
@@ -38,5 +38,32 @@ describe('migration runner failure recovery', () => {
     expect(applied.rows.map(({ name }) => name)).toEqual([
       '001_first.sql', '002_broken.sql', '003_last.sql',
     ]);
+  });
+
+  it('uses a SQLite-specific migration when one is present', async () => {
+    fs.writeFileSync(path.join(dir, '004_dialect.sql'), 'CREATE TABLE wrong_dialect (id INTEGER);');
+    fs.writeFileSync(path.join(dir, '004_dialect.sqlite'), 'CREATE TABLE sqlite_dialect (id INTEGER);');
+
+    await runMigrations(db, dir);
+
+    expect(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_dialect'"
+    ).get()).toEqual({ name: 'sqlite_dialect' });
+    expect(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'wrong_dialect'"
+    ).get()).toBeUndefined();
+  it('orders migrations with a shared numeric prefix by full filename', () => {
+    const duplicatePrefixDir = fs.mkdtempSync(path.join(os.tmpdir(), 'duplicate-prefix-migrations-'));
+    try {
+      fs.writeFileSync(path.join(duplicatePrefixDir, '002_zeta.sql'), '');
+      fs.writeFileSync(path.join(duplicatePrefixDir, '002_alpha.sql'), '');
+
+      expect(getPendingFiles(new Set(), duplicatePrefixDir)).toEqual([
+        '002_alpha.sql',
+        '002_zeta.sql',
+      ]);
+    } finally {
+      fs.rmSync(duplicatePrefixDir, { recursive: true });
+    }
   });
 });

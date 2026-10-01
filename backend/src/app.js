@@ -3,8 +3,15 @@ require('dotenv').config();
 const logger = require('./logger');
 const REQUIRED_ENV = ['JWT_SECRET'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-if (missing.length) {
-  logger.error(`[FATAL] Missing required environment variables: ${missing.join(', ')}`);
+const weakJwtSecret =
+  process.env.NODE_ENV === 'production' &&
+  Buffer.byteLength(process.env.JWT_SECRET || '', 'utf8') < 32;
+if (missing.length || weakJwtSecret) {
+  logger.error(
+    `[FATAL] ${missing.length
+      ? `Missing required environment variables: ${missing.join(', ')}`
+      : 'JWT_SECRET must be at least 32 bytes in production'}`
+  );
   logger.error('Copy backend/.env.example to backend/.env and fill in the values.');
   process.exit(1);
 }
@@ -22,8 +29,14 @@ const { errorHandler } = require('./middleware/error');
 const { notFoundHandler } = require('./middleware/error');
 const { sanitizeResponse } = require('./middleware/sanitize');
 const requestLogger = require('./middleware/requestLogger');
+const categoriesRouter = require('./routes/categories');
+const db = require('./db/schema');
 
 const app = express();
+
+app.use((req, res, next) => {
+  Promise.resolve(db.ready).then(() => next(), next);
+});
 
 // Configure proxy trust based on environment
 // In production, set TRUST_PROXY to the number of proxies or 'true' for all
@@ -79,17 +92,6 @@ app.use(
   })
 );
 
-app.use((req, res, next) => {
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'"
-  );
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  next();
-});
-
 app.use(express.json());
 app.use(cookieParser());
 app.use(sanitizeResponse);
@@ -115,6 +117,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), uploadSta
 app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos'), uploadStaticOptions));
 
 app.get('/api/csrf-token', csrfTokenHandler);
+app.get('/api/v1/csrf-token', csrfTokenHandler);
 // #836: Also expose at /api/auth/csrf-token for SPA initialization (duplicated for discoverability).
 app.get('/api/auth/csrf-token', csrfTokenHandler);
 // #1357: categories is mounted only through registerRoute in ./routes so it
@@ -132,12 +135,12 @@ app.use(require('./routes'));
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Start background jobs (skip in test to avoid open handles)
-if (process.env.NODE_ENV !== 'test') {
+app.locals.startBackgroundJobs = () => {
+  if (process.env.NODE_ENV === 'test') return;
   const { startActivityMonitor } = require('./jobs/activityMonitor');
   startActivityMonitor();
   const { startOrphanedUploadsCleanupJob } = require('./jobs/reconcileOrphanedUploads');
   startOrphanedUploadsCleanupJob();
-}
+};
 
 module.exports = app;

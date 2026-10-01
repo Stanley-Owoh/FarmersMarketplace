@@ -2,7 +2,7 @@ const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const logger = require('../logger');
 const db = require('../db/schema');
-const { Server } = require('@stellar/stellar-sdk');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 // ============================================================================
 // Rate Limiters
@@ -92,7 +92,7 @@ async function checkStellarHorizon(requestId) {
       (process.env.STELLAR_NETWORK === 'mainnet' 
         ? 'https://horizon.stellar.org' 
         : 'https://horizon-testnet.stellar.org');
-    const server = new Server(horizonUrl);
+    const server = new StellarSdk.Horizon.Server(horizonUrl);
     await server.root();
     const duration = Date.now() - startTime;
     logger.info(JSON.stringify({ requestId: requestId || null, event: 'horizon_health_check', status: 'ok', responseTime: `${duration}ms` }));
@@ -263,5 +263,152 @@ const API_V0_SUNSET = process.env.API_V0_SUNSET || '2027-03-31';
 
 /**
  * Add deprecation warn
+function addDeprecationHeaders(req, res, next) {
+  res.setHeader('Deprecation', 'true');
+  res.setHeader('Sunset', new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString()); // 6 months
+  res.setHeader('X-API-Warn', 'The /api endpoint prefix is deprecated. Please use /api/v1 instead.');
+  next();
+}
+
+// ============================================================================
+// SEO Endpoints (non-versioned)
+// ============================================================================
+
+router.get('/sitemap.xml', require('./sitemap'));
+router.get('/robots.txt', (req, res) => {
+  const host = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+  res.type('text/plain').send(
+    `User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: ${host}/sitemap.xml`
+  );
+});
+
+// ============================================================================
+// Health Endpoints (both versions)
+// ============================================================================
+
+router.get('/api/health', async (req, res) => {
+  res.setHeader('Deprecation', 'true');
+  res.setHeader('X-API-Warn', 'Use /api/v1/health instead');
+  const { healthData, statusCode } = await getHealthCheckResponse(false, req.requestId);
+  res.status(statusCode).json(healthData);
+});
+
+router.get('/api/v1/health', async (req, res) => {
+  const { healthData, statusCode } = await getHealthCheckResponse(true, req.requestId);
+  res.status(statusCode).json(healthData);
+});
+
+// ============================================================================
+// Rate Limiters Setup
+// ============================================================================
+
+router.use('/api', generalLimiter);
+router.use('/api/auth/login', authLimiter);
+router.use('/api/auth/register', authLimiter);
+router.use('/api/auth/refresh', authLimiter);
+router.use('/api/v1/auth/login', authLimiter);
+router.use('/api/v1/auth/register', authLimiter);
+router.use('/api/v1/auth/refresh', authLimiter);
+router.use('/api/orders', orderLimiter);
+router.use('/api/v1/orders', orderLimiter);
+router.use('/api/wallet/fund', fundLimiter);
+router.use('/api/v1/wallet/fund', fundLimiter);
+router.use('/api/wallet/send', sendLimiter);
+router.use('/api/v1/wallet/send', sendLimiter);
+
+// ============================================================================
+// Helper Function to Register Routes for Both Versions
+// ============================================================================
+
+/**
+ * Register a route for both /api and /api/v1 versions
+ * Automatically adds deprecation headers to /api routes
+ */
+function registerRoute(basePrefix, path, handler) {
+  // Register /api version with deprecation headers
+  router.use(`/api${path}`, addDeprecationHeaders, handler);
+  
+  // Register /api/v1 version
+  router.use(`/api/v1${path}`, handler);
+}
+
+// ============================================================================
+// Routes Registration
+// ============================================================================
+
+// Non-prefixed routes (CSV token, federation, etc.)
+router.get('/.well-known/stellar.toml', (req, res) => {
+  const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const passphrase =
+    process.env.STELLAR_NETWORK === 'mainnet'
+      ? 'Public Global Stellar Network ; September 2015'
+      : 'Test SDF Network ; September 2015';
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send(`FEDERATION_SERVER="${backendUrl}/federation"\nNETWORK_PASSPHRASE="${passphrase}"\n`);
+});
+
+router.use('/federation', require('./federation'));
+
+// API Routes - registered for both /api and /api/v1
+registerRoute('/', '/auth', require('./auth'));
+registerRoute('/', '', require('./export'));
+registerRoute('/', '/products/bulk', require('./bulkUpload'));
+registerRoute('/', '/products/import', require('./productImport'));
+registerRoute('/', '/products', require('./productVideos'));
+registerRoute('/', '/products', require('./flashSales'));
+registerRoute('/', '/products/:id/calendar', require('./calendar'));
+registerRoute('/', '/products', require('./productShare'));
+registerRoute('/', '/products/market', require('./market'));
+registerRoute('/', '/auth', require('./emailVerification'));
+registerRoute('/', '/auth', require('./authPasswordReset'));
+registerRoute('/', '/products', require('./products'));
+registerRoute('/', '/orders', require('./orderBudgetGuard'));
+registerRoute('/', '/orders', require('./orders'));
+registerRoute('/', '/orders/:id/return', require('./returns'));
+registerRoute('/', '/disputes', require('./disputes'));
+registerRoute('/', '/waitlist', require('./waitlist'));
+registerRoute('/', '/wallet', require('./wallet'));
+registerRoute('/', '/cooperatives', require('./cooperatives'));
+registerRoute('/', '/analytics', require('./analytics'));
+registerRoute('/', '/admin', require('./admin'));
+registerRoute('/', '/admin', require('./adminBan'));
+registerRoute('/', '/admin/audit-log', require('./adminAuditLog'));
+registerRoute('/', '/admin/uploads', require('./adminOrphanedUploads'));
+registerRoute('/', '/farmers', require('./farmers'));
+registerRoute('/', '/rates', require('./rates'));
+registerRoute('/', '/recommendations', require('./recommendations'));
+registerRoute('/', '/favorites', require('./favorites'));
+registerRoute('/', '/addresses', require('./addresses'));
+registerRoute('/', '/messages', require('./messages'));
+registerRoute('/', '/notifications', require('./notifications'));
+registerRoute('/', '/contracts', require('./contracts'));
+registerRoute('/', '/escrow', require('./escrow'));
+registerRoute('/', '/creator-earnings', require('./creatorEarnings'));
+registerRoute('/', '/paymentStreams', require('./paymentStreams'));
+registerRoute('/', '/coupons', require('./coupons'));
+registerRoute('/', '/alerts', require('./alerts'));
+registerRoute('/', '', require('./reviews'));
+registerRoute('/', '/products/import', require('./productImport'));
+const reviewRoutes = require('./reviews');
+registerRoute('/', '/reviews', reviewRoutes);
+registerRoute('/', '/admin/reviews', reviewRoutes.adminRouter);
+registerRoute('/', '/products', reviewRoutes.productRouter);
+registerRoute('/', '/network', require('./network'));
+registerRoute('/', '/batches', require('./batches'));
+registerRoute('/', '/calendar', require('./calendar'));
+registerRoute('/', '/wallet', require('./walletBudget'));
+registerRoute('/', '/market', require('./market'));
+registerRoute('/', '/subscriptions', require('./subscriptions').router);
+registerRoute('/', '/bundles', require('./bundles'));
+registerRoute('/', '/farmers/bundles', require('./bundleDiscounts'));
+const exportRoutes = require('./export');
+registerRoute('/', '/products', exportRoutes.productsRouter);
+registerRoute('/', '/orders', exportRoutes.ordersRouter);
+registerRoute('/', '/announcements', require('./announcements'));
+registerRoute('/', '/auctions', require('./auctions'));
+registerRoute('/', '/disputes', require('./disputes'));
+
+registerRoute('/', '/categories', require('./categories'));
 
 /* … truncated 6657 chars — edit only what you need near the top … */
