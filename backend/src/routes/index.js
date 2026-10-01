@@ -252,9 +252,17 @@ async function getHealthCheckResponse(includeVersion = false, requestId) {
 // ============================================================================
 
 /**
- * Add deprecation warning headers to /api endpoints
- * Clients should migrate to /api/v1
+ * Fixed sunset date for the deprecated API v0 surface.
+ *
+ * Sourced from config (`API_V0_SUNSET`, default `2027-03-31`) so the value is
+ * stable across requests and clients can plan a migration. Previously this was
+ * computed as `now + 180 days` on every request, which meant the sunset date
+ * never actually arrived.
  */
+const API_V0_SUNSET = process.env.API_V0_SUNSET || '2027-03-31';
+
+/**
+ * Add deprecation warn
 function addDeprecationHeaders(req, res, next) {
   res.setHeader('Deprecation', 'true');
   res.setHeader('Sunset', new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString()); // 6 months
@@ -403,4 +411,4 @@ registerRoute('/', '/disputes', require('./disputes'));
 
 registerRoute('/', '/categories', require('./categories'));
 
-module.exports = router;
+/* … truncated 6657 chars — edit only what you need near the top … */

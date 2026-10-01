@@ -95,14 +95,33 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 app.use(sanitizeResponse);
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos')));
+
+// #1360: Serve uploaded files with hardened headers so a stored file can never
+// be interpreted as active content (HTML/SVG) on the API origin. The restrictive
+// CSP, nosniff and inline Content-Disposition with a safe filename neutralise
+// stored-XSS attempts even if a malicious file slips through validation.
+const uploadStaticOptions = {
+  index: false,
+  dotfiles: 'deny',
+  setHeaders: (res, filePath) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; img-src 'self'; media-src 'self'"
+    );
+    const safeName = path.basename(filePath).replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+  },
+};
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), uploadStaticOptions));
+app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos'), uploadStaticOptions));
 
 app.get('/api/csrf-token', csrfTokenHandler);
 app.get('/api/v1/csrf-token', csrfTokenHandler);
 // #836: Also expose at /api/auth/csrf-token for SPA initialization (duplicated for discoverability).
 app.get('/api/auth/csrf-token', csrfTokenHandler);
-app.use('/api/categories', categoriesRouter);
+// #1357: categories is mounted only through registerRoute in ./routes so it
+// goes through the same rate limiter and CSRF ordering as every other router.
 
 // Interactive API documentation
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
