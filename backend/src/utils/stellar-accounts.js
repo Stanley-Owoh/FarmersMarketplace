@@ -42,6 +42,9 @@ function decryptAndDeriveKeypair(encryptedSeedPhrase) {
   }
 }
 
+const config = require('../config');
+const { isTestnet, server, networkPassphrase } = require('./stellar-config');
+
 // In-memory cache: publicKey -> { federationAddress, expiresAt }
 const _federationCache = new Map();
 const FEDERATION_TTL_MS = 10 * 60 * 1000;

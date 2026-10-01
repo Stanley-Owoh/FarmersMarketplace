@@ -16,9 +16,24 @@ const { startPushSubscriptionCleanup } = require('./jobs/cleanupPushSubscription
 const { startExpiryJob } = require('./jobs/deactivateExpiredProducts');
 const { startAnonymizeJob } = require('./jobs/anonymizeDeactivatedUsers');
 const { startAuctionJob } = require('./jobs/auctionCron');
+const { start: startPaymentConfirmationJob } = require('./jobs/confirmPayments');
 const { createBackup } = require('./scripts/backup');
 const PORT = process.env.PORT || 4000;
 
+app.listen(PORT, () => {
+  logger.info(`Backend running on http://localhost:${PORT}`);
+  startSubscriptionJob();
+  startFailedEmailCleanupJob();
+  startProductViewsAggJob();
+  startFreshnessJob();
+  startContractMonitor();
+  startContractRegistrySync();
+  startCreatorEarningsMonitor();
+  startPushSubscriptionCleanup();
+  startAnonymizeJob();
+  startExpiryJob();
+  startAuctionJob();
+  startPaymentConfirmationJob();
 async function start() {
   await db.ready;
   app.listen(PORT, () => {

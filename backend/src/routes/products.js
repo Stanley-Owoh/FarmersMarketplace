@@ -11,6 +11,7 @@ const { rewriteImageUrl } = require('../utils/cdn');
 const { sendBackInStockEmail } = require('../utils/mailer');
 const AutomaticOrderProcessor = require('../services/AutomaticOrderProcessor');
 const logger = require('../logger');
+const { stockClients, broadcastStockUpdate } = require('../utils/stockUpdates');
 
 
 const VALID_ALLERGENS = ['gluten', 'nuts', 'dairy', 'eggs', 'soy', 'shellfish'];
@@ -48,7 +49,7 @@ function normalizePreorderInput(body) {
  *     tags: [Products]
  */
 // GET /api/products - public browse with optional filters
-router.get('/', async (req, res) => {
+async function listProducts(req, res) {
   const role = req.user?.role || 'public';
   const cacheKey = `products:${role}:${JSON.stringify(req.query)}`;
   const cached = await cache.get(cacheKey);
@@ -152,12 +153,29 @@ router.get('/', async (req, res) => {
   }
   await cache.set(cacheKey, payload, 60);
   res.json(payload);
-});
+}
+
+router.get('/', listProducts);
 
 // GET /api/products/allergens — returns the canonical allergen whitelist
 router.get('/allergens', (req, res) => {
   res.json({ success: true, allergens: VALID_ALLERGENS });
 });
+
+// GET /api/products/categories — compatibility alias used by the marketplace client.
+router.get('/categories', async (_req, res) => {
+  const { rows } = await db.query(
+    `SELECT c.id, c.name, c.slug, COUNT(p.id) AS product_count
+     FROM categories c
+     LEFT JOIN products p ON p.category_id = c.id
+     GROUP BY c.id, c.name, c.slug
+     ORDER BY c.name`
+  );
+  res.json({ success: true, data: rows });
+});
+
+// GET /api/products/search — search alias used by the marketplace client.
+router.get('/search', listProducts);
 
 // GET /api/products/:id
 router.get('/:id', async (req, res) => {
@@ -898,22 +916,6 @@ router.get('/:id/price-history', async (req, res) => {
   );
   res.json({ success: true, data: rows });
 });
-
-// In-memory map of productId → Set of SSE response objects
-const stockClients = new Map();
-
-/**
- * Broadcast a stock update to all SSE clients watching a product.
- * Called from orders.js after a successful purchase.
- */
-function broadcastStockUpdate(productId, quantity) {
-  const clients = stockClients.get(String(productId));
-  if (!clients || clients.size === 0) return;
-  const payload = `data: ${JSON.stringify({ quantity })}\n\n`;
-  for (const client of clients) {
-    try { client.write(payload); } catch { /* client disconnected */ }
-  }
-}
 
 // GET /api/products/:id/stock-stream — public SSE endpoint
 router.get('/:id/stock-stream', async (req, res) => {

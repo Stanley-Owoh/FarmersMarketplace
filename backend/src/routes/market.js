@@ -8,8 +8,8 @@ const { getOrderBook } = require('../utils/stellar');
 let _cache = { data: null, fetchedAt: 0 };
 const CACHE_TTL = 60 * 1000; // 60 seconds
 
-// GET /api/market/xlm-usdc — returns XLM/USDC order book with 60s cache
-router.get('/xlm-usdc', async (req, res) => {
+// Returns the XLM/USDC order book with a 60-second cache.
+async function getXlmUsdc(_req, res) {
   const now = Date.now();
 
   if (_cache.data && now - _cache.fetchedAt < CACHE_TTL) {
@@ -26,7 +26,10 @@ router.get('/xlm-usdc', async (req, res) => {
     }
     return err(res, 503, 'Stellar DEX data unavailable', 'dex_unavailable');
   }
-});
+}
+
+router.get('/xlm-usdc', getXlmUsdc);
+router.get('/', getXlmUsdc);
 
 // GET /api/products/:id/qr — returns a PNG QR code for the product URL
 router.get('/:id/qr', async (req, res) => {

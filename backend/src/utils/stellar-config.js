@@ -10,6 +10,8 @@ if (!['testnet', 'mainnet'].includes(STELLAR_NETWORK)) {
   throw new Error(`Invalid STELLAR_NETWORK "${STELLAR_NETWORK}". Must be "testnet" or "mainnet".`);
 }
 
+const isTestnet = STELLAR_NETWORK === 'testnet';
+
 if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== 'true') {
   throw new Error(
     'Mainnet use requires STELLAR_MAINNET_CONFIRMED=true in your environment. ' +
@@ -17,7 +19,9 @@ if (STELLAR_NETWORK === 'mainnet' && process.env.STELLAR_MAINNET_CONFIRMED !== '
   );
 }
 
-const isTestnet = STELLAR_NETWORK === 'testnet';
+const horizonUrl =
+  process.env.STELLAR_HORIZON_URL ||
+  (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
 
 const horizonUrl =
   process.env.STELLAR_HORIZON_URL ||

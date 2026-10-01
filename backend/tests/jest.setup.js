@@ -41,7 +41,14 @@ jest.mock('../src/utils/stellar', () => ({
   createWalletFromMnemonic: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET', mnemonic: 'word '.repeat(12).trim() })),
   deriveKeypairFromMnemonic: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
   getBalance: jest.fn().mockResolvedValue(1000),
+  getPlatformFeeInfo: jest.fn((amount) => ({
+    feePercent: 0,
+    feeAmount: 0,
+    farmerAmount: amount,
+  })),
   getTransactions: jest.fn().mockResolvedValue([]),
+  generatePaymentLink: jest.fn(() => 'web+stellar:pay?test'),
+  mintRewardTokens: jest.fn().mockResolvedValue({}),
   fundTestnetAccount: jest.fn().mockResolvedValue({}),
   sendPayment:        jest.fn().mockResolvedValue('TXHASH123'),
   getPlatformFeeInfo: jest.fn((amount) => ({ feePercent: 0, feeAmount: 0, farmerAmount: amount, platformWallet: null })),
@@ -88,6 +95,7 @@ jest.mock('../src/utils/cdn', () => ({ rewriteImageUrl: (url) => url }));
 jest.mock('../src/utils/pushNotifications', () => ({ sendPushToUser: jest.fn().mockResolvedValue({}) }));
 jest.mock('../src/utils/geocheck', () => ({
   checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }),
+  checkCoordinateGeoFence: jest.fn(() => ({ allowed: true })),
   checkCoordinateGeoFence: jest.fn().mockReturnValue({ checked: false, allowed: true, distanceKm: null, reason: null }),
 }));
 jest.mock('../src/utils/idempotency', () => ({
