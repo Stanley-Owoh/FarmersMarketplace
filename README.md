@@ -534,3 +534,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1309 -->
 - #1309: Payment-stream storage entries are never TTL-extended
+
+<!-- handsoff-issue-1382 -->
+- #1382: Align `api/client.js` with real backend routes: about a dozen methods call endpoints that don't exist
