@@ -979,6 +979,15 @@ router.get('/sales', auth, async (req, res) => {
 });
 
 // PATCH /api/orders/:id/status
+router.get('/:id/status', auth, async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, status FROM orders WHERE id = $1 AND buyer_id = $2',
+    [req.params.id, req.user.id]
+  );
+  if (!rows[0]) return err(res, 404, 'Order not found', 'not_found');
+  res.json({ success: true, ...rows[0] });
+});
+
 router.patch('/:id/status', auth, validate.updateOrderStatus, async (req, res) => {
   if (req.user.role !== 'farmer') return err(res, 403, 'Farmers only', 'forbidden');
   const { status } = req.body;
