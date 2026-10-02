@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { FavoritesProvider } from './context/FavoritesContext';
 import { CompareProvider } from './context/CompareContext';
+import { NetworkProvider } from './context/NetworkContext';
 import { LoadingProvider, LoadingContext } from './context/LoadingContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { setLoadingCallback, setLogoutCallback } from './api/client';
@@ -133,6 +134,17 @@ export default function App() {
             </FavoritesProvider>
           </AuthProvider>
         </ThemeProvider>
+        <AuthProvider>
+          <FavoritesProvider>
+            <CompareProvider>
+              <LoadingProvider>
+                <NetworkProvider>
+                  <AppContent />
+                </NetworkProvider>
+              </LoadingProvider>
+            </CompareProvider>
+          </FavoritesProvider>
+        </AuthProvider>
       </ErrorBoundary>
     </HelmetProvider>
   );

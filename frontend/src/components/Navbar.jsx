@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
+import { useNetwork } from '../context/NetworkContext';
 
 const s = {
   nav: { background: '#2d6a4f', padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
@@ -23,17 +24,13 @@ export default function Navbar() {
   const { user, logout } = useAuth();
   const { theme, toggleTheme, useSystemTheme, isUsingSystemTheme } = useTheme();
   const { i18n } = useTranslation();
+  const { network } = useNetwork();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [network, setNetwork] = useState(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const navRef = useRef(null);
   const hamburgerRef = useRef(null);
   const drawerRef = useRef(null);
-
-  useEffect(() => {
-    api.getNetwork().then(res => setNetwork(res.network)).catch(() => {});
-  }, []);
 
   // Initial unread-message count
   useEffect(() => {
@@ -139,9 +136,9 @@ export default function Navbar() {
       >
         🌿 FarmersMarket
       </NavLink>
-      {network && (
+      {network && network !== 'mainnet' && (
         <span style={{
-          background: network === 'mainnet' ? '#c0392b' : '#2d6a4f',
+          background: '#2d6a4f',
           color: '#fff',
           borderRadius: 4,
           padding: '2px 8px',
@@ -150,7 +147,7 @@ export default function Navbar() {
           letterSpacing: 0.5,
           textTransform: 'uppercase',
         }}>
-          {network}
+          TESTNET
         </span>
       )}
       <button

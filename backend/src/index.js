@@ -2,6 +2,7 @@ require('./config'); // validate env vars before anything else
 const { validateStellarConfig } = require('./utils/stellar-config');
 validateStellarConfig(); // fail fast on missing Stellar/Soroban config
 const app = require('./app');
+const db = require('./db/schema');
 const logger = require('./logger');
 const cron = require('node-cron');
 const { startSubscriptionJob } = require('./jobs/processSubscriptions');
@@ -15,6 +16,7 @@ const { startPushSubscriptionCleanup } = require('./jobs/cleanupPushSubscription
 const { startExpiryJob } = require('./jobs/deactivateExpiredProducts');
 const { startAnonymizeJob } = require('./jobs/anonymizeDeactivatedUsers');
 const { startAuctionJob } = require('./jobs/auctionCron');
+const { start: startPaymentConfirmationJob } = require('./jobs/confirmPayments');
 const { createBackup } = require('./scripts/backup');
 const PORT = process.env.PORT || 4000;
 
@@ -31,19 +33,42 @@ app.listen(PORT, () => {
   startAnonymizeJob();
   startExpiryJob();
   startAuctionJob();
+  startPaymentConfirmationJob();
+async function start() {
+  await db.ready;
+  app.listen(PORT, () => {
+    logger.info(`Backend running on http://localhost:${PORT}`);
+    app.locals.startBackgroundJobs();
+    startSubscriptionJob();
+    startFailedEmailCleanupJob();
+    startProductViewsAggJob();
+    startFreshnessJob();
+    startContractMonitor();
+    startContractRegistrySync();
+    startCreatorEarningsMonitor();
+    startPushSubscriptionCleanup();
+    startAnonymizeJob();
+    startExpiryJob();
+    startAuctionJob();
 
-  cron.schedule('0 0 * * *', async () => {
-    logger.info('Starting scheduled daily backup');
-    try {
-      await createBackup();
-      logger.info('Daily backup completed successfully');
-    } catch (error) {
-      logger.error('Daily backup failed:', { error: error.message });
-    }
-  }, {
-    scheduled: true,
-    timezone: 'UTC'
+    cron.schedule('0 0 * * *', async () => {
+      logger.info('Starting scheduled daily backup');
+      try {
+        await createBackup();
+        logger.info('Daily backup completed successfully');
+      } catch (error) {
+        logger.error('Daily backup failed:', { error: error.message });
+      }
+    }, {
+      scheduled: true,
+      timezone: 'UTC'
+    });
+
+    logger.info('Daily backup cron job scheduled at midnight UTC');
   });
+}
 
-  logger.info('Daily backup cron job scheduled at midnight UTC');
+start().catch((error) => {
+  logger.error('Backend startup failed:', { error: error.message });
+  process.exitCode = 1;
 });
