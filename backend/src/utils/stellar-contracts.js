@@ -3,6 +3,7 @@ const config = require('../config');
 const db = require('../db/schema');
 const { StellarSdk, isTestnet, server, sorobanServer, networkPassphrase } = require('./stellar-config');
 const logger = require('../logger');
+const { decryptUserSecretKey } = require('./crypto');
 
 function normalizeWasmHash(h) {
   if (h == null || typeof h !== 'string') return null;
@@ -480,6 +481,69 @@ async function invokeContract({ contractId, method, args = [], signerSecret }) {
   throw new Error('Transaction confirmation timeout');
 }
 
+async function recordCarbonOffset({ orderId, kgCo2, verifierPublicKey, verifierSecret }) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  const adminSecret = process.env.CARBON_OFFSET_ADMIN_SECRET;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  if (!adminSecret) throw new Error('CARBON_OFFSET_ADMIN_SECRET is not configured');
+  if (!verifierSecret) throw new Error('Verifier Stellar secret is not available');
+
+  const numericOrderId = Number(orderId);
+  const numericKgCo2 = Number(kgCo2);
+  if (!Number.isSafeInteger(numericOrderId) || numericOrderId < 0) {
+    throw new Error('orderId must be a non-negative safe integer');
+  }
+  if (!Number.isFinite(numericKgCo2) || numericKgCo2 <= 0) {
+    throw new Error('kgCo2 must be positive');
+  }
+  const verifiedKgCo2 = Math.ceil(numericKgCo2);
+  const verifierKeypair = StellarSdk.Keypair.fromSecret(
+    await decryptUserSecretKey(verifierSecret)
+  );
+  if (verifierKeypair.publicKey() !== verifierPublicKey) {
+    throw new Error('Verifier secret does not match verifierPublicKey');
+  }
+
+  const commonArgs = [
+    { type: 'u64', value: numericOrderId },
+    { type: 'u64', value: verifiedKgCo2 },
+    { type: 'address', value: verifierPublicKey },
+  ];
+  const verifierAuthorization = await invokeContract({
+    contractId,
+    method: 'authorize_offset',
+    args: commonArgs,
+    signerSecret: verifierKeypair.secret(),
+  });
+  const record = await invokeContract({
+    contractId,
+    method: 'record_offset',
+    args: commonArgs,
+    signerSecret: adminSecret,
+  });
+
+  return {
+    contractId,
+    verifierTxHash: verifierAuthorization.hash,
+    txHash: record.hash,
+  };
+}
+
+async function getCarbonOffset(orderId) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+
+  const sim = await simulateContractCall(contractId, 'get_offset', [
+    { type: 'u64', value: Number(orderId) },
+  ]);
+  if (!sim.success) {
+    const error = new Error(`Failed to read carbon offset: ${sim.error || 'simulation failed'}`);
+    error.code = 'carbon_offset_read_failed';
+    throw error;
+  }
+  return sim.result ?? null;
+}
+
 /**
  * Simpler simulation wrapper used by admin routes — does not support typed arg objects.
  * Uses `PLATFORM_WALLET_PUBLIC_KEY` as the source account.
@@ -760,6 +824,67 @@ async function deployContract({ wasmBuffer, deployerSecret }) {
   throw new Error('Failed to extract contract ID from transaction result');
 }
 
+async function recordCarbonOffset({ orderId, kgCo2, verifierPublicKey }) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  const adminSecret = process.env.CARBON_OFFSET_ADMIN_SECRET;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  if (!adminSecret) throw new Error('CARBON_OFFSET_ADMIN_SECRET is not configured');
+
+  const keypair = StellarSdk.Keypair.fromSecret(adminSecret);
+  const source = await server.loadAccount(keypair.publicKey());
+  const contract = new StellarSdk.Contract(contractId);
+  let transaction = new StellarSdk.TransactionBuilder(source, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'record_offset',
+        StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+        StellarSdk.nativeToScVal(Math.round(Number(kgCo2)), { type: 'u64' }),
+        StellarSdk.nativeToScVal(verifierPublicKey, { type: 'address' })
+      )
+    )
+    .setTimeout(60)
+    .build();
+
+  transaction = await sorobanServer.prepareTransaction(transaction);
+  transaction.sign(keypair);
+  const submission = await sorobanServer.sendTransaction(transaction);
+  if (submission.status === 'ERROR') {
+    throw new Error(submission.errorResultXdr || 'Soroban transaction submission failed');
+  }
+
+  const txHash = submission.hash || transaction.hash().toString('hex');
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const result = await sorobanServer.getTransaction(txHash);
+    if (result.status === 'SUCCESS') {
+      await logEscrowInvocation({
+        contractId,
+        method: 'record_offset',
+        args: { orderId, kgCo2, verifierPublicKey },
+        txHash,
+        success: true,
+        error: null,
+        userId: null,
+      });
+      return { txHash, contractId };
+    }
+    if (result.status === 'FAILED') throw new Error('Soroban transaction failed');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error('Soroban transaction confirmation timed out');
+}
+
+async function getCarbonOffset(orderId) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  return simulateContractCall(contractId, 'get_offset', [
+    { type: 'u64', value: Number(orderId) },
+  ]);
+}
+
 module.exports = {
   normalizeWasmHash,
   getContractState,
@@ -768,10 +893,14 @@ module.exports = {
   invokeEscrowContract,
   getEscrowState,
   invokeContract,
+  recordCarbonOffset,
+  getCarbonOffset,
   simulateContract,
   getContractABI,
   analyzeContractFees,
   getContractEvents,
   getContractFunctionSignatures,
   deployContract,
+  recordCarbonOffset,
+  getCarbonOffset,
 };
