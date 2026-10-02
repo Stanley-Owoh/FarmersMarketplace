@@ -122,7 +122,7 @@ export const api = {
 
   getProducts: (filters = {}) => request(`/products${toQs(filters)}`),
   getCategories: () => request('/products/categories'),
-  getProduct: (id) => request(`/products/${id}`),
+  getProduct: (id, options) => request(`/products/${id}`, options),
   createProduct: (body) => request('/products', { method: 'POST', body }),
   getMyProducts: () => request('/products/mine/list'),
   getHarvestBatches: () => request('/batches'),

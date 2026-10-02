@@ -46,6 +46,7 @@ import QRCode from 'qrcode.react';
 import { useReviewForm } from '../hooks/useReviewForm';
 import { usePaymentLink } from '../hooks/usePaymentLink';
 import { addRecentlyViewed } from '../utils/recentlyViewed';
+import { useNetwork } from '../context/NetworkContext';
 
 const s = {
   page: { maxWidth: 640, margin: "40px auto", padding: 16 },
@@ -116,6 +117,7 @@ function CopyButton({ url }) {
 }
 
 export default function ProductDetail() {
+  const { explorerUrl } = useNetwork();
   const { t } = useTranslation();
   const { id } = useParams();
   const { user } = useAuth();
@@ -764,7 +766,7 @@ export default function ProductDetail() {
                   <p style={{ marginTop: 4, fontSize: 12, color: '#555' }}>
                     {result.sorobanEscrow ? 'Escrow' : 'Balance'}:{' '}
                     <a
-                      href={`https://stellar.expert/explorer/testnet/claimable-balance/${result.claimableBalanceId || result.balanceId}`}
+                      href={explorerUrl('claimable-balance', result.claimableBalanceId || result.balanceId)}
                       target="_blank"
                       rel="noreferrer"
                       style={{ color: '#2d6a4f', wordBreak: 'break-all' }}
@@ -778,7 +780,7 @@ export default function ProductDetail() {
                 </p>
                 {result.balanceId ? (
                   <p style={{ marginTop: 4, fontSize: 12, color: '#555' }}>
-                    Balance ID: <a href={`https://stellar.expert/explorer/testnet/claimable-balance/${result.balanceId}`}
+                    Balance ID: <a href={explorerUrl('claimable-balance', result.balanceId)}
                       target="_blank" rel="noreferrer" style={{ color: '#2d6a4f', wordBreak: 'break-all' }}>{result.balanceId}</a>
                   </p>
                 ) : null}
