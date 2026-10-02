@@ -135,6 +135,7 @@ app.use(require('./routes'));
 app.use(notFoundHandler);
 app.use(errorHandler);
 
+// Background jobs are started from src/index.js via jobs/index.js (#1367), never on import.
 app.locals.startBackgroundJobs = () => {
   if (process.env.NODE_ENV === 'test') return;
   const { startActivityMonitor } = require('./jobs/activityMonitor');

@@ -105,6 +105,12 @@ describe('Successful request', () => {
 // ── 401 auto-refresh and retry ────────────────────────────────────────────────
 
 describe('401 auto-refresh and retry', () => {
+  // refreshAccessToken() prefetches a CSRF token when the cookie is missing (#1380);
+  // give it one so the mocked fetch sequence is orig → refresh → retry.
+  beforeEach(() => {
+    document.cookie = 'csrf_token=test-csrf; path=/';
+  });
+
   it('retries the original request after a successful token refresh', async () => {
     setAccessToken('expired-token');
 
@@ -203,6 +209,12 @@ describe('401 auto-refresh and retry', () => {
 // ── refresh endpoint call details ─────────────────────────────────────────────
 
 describe('Refresh token call', () => {
+  // refreshAccessToken() prefetches a CSRF token when the cookie is missing (#1380);
+  // give it one so the mocked fetch sequence is orig → refresh → retry.
+  beforeEach(() => {
+    document.cookie = 'csrf_token=test-csrf; path=/';
+  });
+
   it('calls POST /api/v1/auth/refresh with credentials: include', async () => {
     setAccessToken('t');
 

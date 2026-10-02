@@ -255,6 +255,57 @@ async function dispatchEvent(contractId, ev) {
     case 'refund':  return handleRefund(contractId, topics, ev.data, txHash);
     case 'dispute': return handleDispute(contractId, topics, ev.data, txHash);
     default:
+      // Store other events without DB side-effects
+      await storeInvocation({ contractId, method: action || 'unknown', args: ev.data, txHash, invocationIndex: 0, success: true, error: null });
+  }
+}
+
+// ── monitor loop ──────────────────────────────────────────────────────────────
+
+async function monitorContract(contractId, retryCount = 0) {
+  const lastLedger = await getLastLedger(contractId);
+
+  // Build filter: resume from last processed ledger + 1, or fall back to 1 h ago
+  const filters = lastLedger > 0
+    ? { fromLedger: lastLedger + 1, limit: 200 }
+    : { from: new Date(Date.now() - 60 * 60 * 1000).toISOString(), limit: 200 };
+
+  let result;
+  try {
+    result = await getContractEvents(contractId, filters);
+  } catch (err) {
+    if (retryCount < MAX_RETRIES) {
+      const backoffMs = Math.min(Math.pow(2, retryCount) * 1000, MAX_BACKOFF_MS);
+      logger.warn(
+        `[ContractMonitor] Failed to fetch events for ${contractId}, retrying in ${backoffMs}ms (attempt ${retryCount + 1}/${MAX_RETRIES}):`,
+        err.message
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      return monitorContract(contractId, retryCount + 1);
+    }
+
+    logger.error(`[ContractMonitor] Failed to fetch events for ${contractId} after ${MAX_RETRIES} retries:`, err.message);
+
+    // Send admin alert (non-fatal)
+    try {
+      const { rows: admins } = await db.query(`SELECT email FROM users WHERE role = 'admin' LIMIT 1`);
+      if (admins[0]) {
+        const { sendContractAlert } = require('../utils/mailer');
+        await sendContractAlert({
+          to: admins[0].email,
+          alert: { alert_type: 'monitor_failure', contract_id: contractId, message: err.message },
+        }).catch(() => {});
+      }
+    } catch { /* non-fatal */ }
+
+    // Record the alert for the admin dashboard (non-fatal)
+    try {
+      await db.query(
+        `INSERT INTO contract_alerts (contract_id, alert_type, severity, message) VALUES ($1, $2, $3, $4)`,
+        [contractId, 'monitor_failure', 'critical', `Failed to fetch events after ${MAX_RETRIES} retries: ${err.message}`]
+      );
+    } catch { /* non-fatal */ }
+    return;
       // resolve / auto_release / stream_* share the release-style settlement
       // semantics: the order is settled and the buyer is notified.
       return handleRelease(contractId, topics, ev.data, txHash);
@@ -262,6 +313,13 @@ async function dispatchEvent(contractId, ev) {
 }
 
 module.exports = {
+  startContractMonitor,
+  runMonitoringJob,
+  // exported for testing
+  _handlers: { handleDeposit, handleRelease, handleRefund, handleDispute, dispatchEvent },
+  _cursor: { getLastLedger, saveLastLedger },
+  // Re-export audit functions from contractAudit module
+  ...require('../utils/contractAudit'),
   dispatchEvent,
   extractOrderId,
   getLastLedger,

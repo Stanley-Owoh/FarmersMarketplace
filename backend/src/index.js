@@ -4,6 +4,7 @@ validateStellarConfig(); // fail fast on missing Stellar/Soroban config
 const app = require('./app');
 const db = require('./db/schema');
 const logger = require('./logger');
+const { startJobs } = require('./jobs');
 const cron = require('node-cron');
 const { startSubscriptionJob } = require('./jobs/processSubscriptions');
 const { startFailedEmailCleanupJob } = require('./jobs/cleanupFailedEmails');
@@ -22,6 +23,8 @@ const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () => {
   logger.info(`Backend running on http://localhost:${PORT}`);
+  // Background jobs run only in the process started with RUN_JOBS=true (#1367).
+  startJobs();
   startSubscriptionJob();
   startFailedEmailCleanupJob();
   startProductViewsAggJob();

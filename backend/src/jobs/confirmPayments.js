@@ -4,9 +4,17 @@ const logger = require('../logger');
 const { sendLowStockAlert } = require('../utils/mailer');
 const { broadcastStockUpdate } = require('../utils/stockUpdates');
 
+// Orders sit in 'confirming' for at most TIMEOUT_MS, so poll well inside that window.
+const POLL_INTERVAL_MS = parseInt(process.env.CONFIRM_PAYMENTS_INTERVAL_MS || '15000', 10);
+const TIMEOUT_MS = 60000;
 const POLL_INTERVAL_MS = 15000;
 const PAYMENT_EXPIRY_MS = 30 * 60 * 1000;
 
+/**
+ * Settles orders in 'confirming': marks them paid once their Stellar tx shows up
+ * on the buyer's account, or failed (restocking the product) after TIMEOUT_MS.
+ * Scheduled by jobs/index.js.
+ */
 async function confirmPendingOrders() {
   const { rows: pendingOrders } = await db.query(
     `SELECT o.id, o.total_price, o.stellar_memo, o.quantity, o.product_id, o.created_at,
@@ -19,6 +27,15 @@ async function confirmPendingOrders() {
        AND o.stellar_memo LIKE 'order:%'`
   );
 
+  for (const order of confirming) {
+    const submittedAt = new Date(order.tx_submitted_at).getTime();
+    if (Date.now() - submittedAt > TIMEOUT_MS) {
+      await db.query(`UPDATE orders SET status = 'failed' WHERE id = $1`, [order.id]);
+      await db.query(`UPDATE products SET quantity = quantity + $1 WHERE id = $2`, [
+        order.quantity,
+        order.product_id,
+      ]);
+      logger.info(`[confirm] Order ${order.id} timed out`);
   const ordersByFarmer = new Map();
   for (const order of pendingOrders) {
     if (!order.farmer_public_key) {
@@ -33,6 +50,11 @@ async function confirmPendingOrders() {
   for (const [farmerPublicKey, orders] of ordersByFarmer) {
     let payments;
     try {
+      const txs = await getTransactions(order.stellar_public_key);
+      const confirmed = txs.some((tx) => tx.hash === order.stellar_tx_hash);
+      if (confirmed) {
+        await db.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [order.id]);
+        logger.info(`[confirm] Order ${order.id} confirmed — TX ${order.stellar_tx_hash}`);
       payments = await findIncomingPaymentsByMemo(
         farmerPublicKey,
         orders.map((order) => ({
@@ -92,6 +114,7 @@ async function confirmPendingOrders() {
   }
 }
 
+module.exports = { confirmPendingOrders, POLL_INTERVAL_MS };
 async function publishStockUpdate(order) {
   try {
     const { rows } = await db.query(

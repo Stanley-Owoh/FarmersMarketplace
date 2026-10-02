@@ -34,6 +34,9 @@ services:
       REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
       STELLAR_NETWORK: ${STELLAR_NETWORK:-testnet}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:3000}
+      # Single backend container, so it is the jobs leader. With several replicas,
+      # set RUN_JOBS=true on exactly one of them (#1367).
+      RUN_JOBS: ${RUN_JOBS:-true}
     ports:
       - '4000:4000'
     volumes:
