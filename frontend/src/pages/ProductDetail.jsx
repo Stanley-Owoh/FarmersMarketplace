@@ -898,9 +898,9 @@ export default function ProductDetail() {
                   ))}
                 </div>
                 <div style={s.dotRow} aria-hidden="true">
-                  {images.map((_, i) => (
+                  {images.map((img, i) => (
                     <button
-                      key={i}
+                      key={img.id}
                       style={{ ...s.dot, ...(i === safeActiveImg ? s.dotActive : {}) }}
                       onClick={() => setActiveImg(i)}
                       tabIndex={-1}
@@ -1414,6 +1414,8 @@ export default function ProductDetail() {
                   <div key={d} style={{ textAlign: 'center', fontSize: 11, color: '#888', fontWeight: 600, padding: '2px 0' }}>{d}</div>
                 ))}
                 {cells.map((day, i) => {
+                  // Leading blank cells are static spacers for a fixed calendar grid.
+                  // eslint-disable-next-line react/no-array-index-key
                   if (!day) return <div key={`blank-${i}`} />;
                   const weekKey = getMondayOf(year, month, day);
                   const isAvail = availableWeeks.has(weekKey);
