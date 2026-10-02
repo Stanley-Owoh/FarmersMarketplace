@@ -7,6 +7,7 @@ import { FavoritesProvider } from './context/FavoritesContext';
 import { CompareProvider } from './context/CompareContext';
 import { NetworkProvider } from './context/NetworkContext';
 import { LoadingProvider, LoadingContext } from './context/LoadingContext';
+import { ThemeProvider } from './context/ThemeContext';
 import { setLoadingCallback, setLogoutCallback } from './api/client';
 import ErrorBoundary from './components/ErrorBoundary';
 import Navbar from './components/Navbar';
@@ -122,6 +123,17 @@ export default function App() {
   return (
     <HelmetProvider>
       <ErrorBoundary>
+        <ThemeProvider>
+          <AuthProvider>
+            <FavoritesProvider>
+              <CompareProvider>
+                <LoadingProvider>
+                  <AppContent />
+                </LoadingProvider>
+              </CompareProvider>
+            </FavoritesProvider>
+          </AuthProvider>
+        </ThemeProvider>
         <AuthProvider>
           <FavoritesProvider>
             <CompareProvider>

@@ -565,6 +565,11 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 ## Handsoff notes
 
+<!-- handsoff-issue-1370 -->
+- #1370: The frontend production build is broken: 7 source files fail to parse
+
+<!-- handsoff-issue-1372 -->
+- #1372: `Dashboard.jsx` doesn't parse: the style object isn't closed properly (L202)
 <!-- handsoff-issue-1383 -->
 - #1383: Dashboard CSV/JSON export sends no auth token, uses the deprecated prefix, and saves error bodies as files
 <!-- handsoff-issue-1302 -->
