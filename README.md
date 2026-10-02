@@ -565,6 +565,8 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 ## Handsoff notes
 
+<!-- handsoff-issue-1383 -->
+- #1383: Dashboard CSV/JSON export sends no auth token, uses the deprecated prefix, and saves error bodies as files
 <!-- handsoff-issue-1302 -->
 - #1302: `set_auto_release_days` has no bounds, so an admin can set `0` and allow instant permissionless release
 
