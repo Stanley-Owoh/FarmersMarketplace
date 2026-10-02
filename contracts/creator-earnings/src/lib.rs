@@ -214,7 +214,6 @@ impl CreatorEarningsContract {
             return Err(EarningsError::CreatorIsPlatform);
         }
 
-        let fee_amount: i128 = (amount * fee_bps as i128) / 10_000;
         let fee_amount: i128 = Self::compute_fee(amount, fee_bps);
         let farmer_amount: i128 = amount - fee_amount;
 
@@ -224,17 +223,11 @@ impl CreatorEarningsContract {
         env.storage()
             .persistent()
             .set(&key, &(prev + farmer_amount));
-        let balance_key = DataKey::Balance(creator.clone());
-        let prev: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
-        env.storage().persistent().set(&balance_key, &(prev + farmer_amount));
 
         // Accumulate lifetime earnings (independent of claimable balance, never reset).
         let lifetime_key = DataKey::LifetimeEarned(creator.clone());
         let lifetime_prev: i128 = env.storage().persistent().get(&lifetime_key).unwrap_or(0);
         env.storage().persistent().set(&lifetime_key, &(lifetime_prev + farmer_amount));
-        let creator_key = DataKey::Balance(creator.clone());
-        let creator_prev: i128 = env.storage().persistent().get(&creator_key).unwrap_or(0);
-        env.storage().persistent().set(&creator_key, &(creator_prev + farmer_amount));
 
         // Accumulate the platform's claimable fee balance.
         let platform_key = DataKey::Balance(platform);
@@ -310,6 +303,9 @@ impl CreatorEarningsContract {
             return Err(EarningsError::ZeroBalance);
         }
 
+        // #1240 — zeroing before the transfer is safe: Soroban invocations are
+        // atomic, so if the transfer fails (token paused/frozen, insufficient
+        // contract balance) this write is reverted with the rest of the call.
         env.storage().persistent().set(&key, &0_i128);
 
         token::Client::new(&env, &token).transfer(
@@ -456,6 +452,25 @@ mod test {
                 .persistent()
                 .set(&DataKey::Balance(creator), &amount);
         });
+    }
+
+    // ── #1240 failed token transfer does not commit balance reset ────────────
+
+    #[test]
+    fn claim_failed_transfer_keeps_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorEarningsContract, ());
+        // Real SAC; the contract holds 0 tokens, so the claim transfer fails.
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let creator = Address::generate(&env);
+        seed_balance(&env, &contract_id, creator.clone(), 500);
+
+        let client = CreatorEarningsContractClient::new(&env, &contract_id);
+        assert!(client.try_claim(&creator, &token).is_err());
+        assert_eq!(balance(&env, &contract_id, creator), 500);
     }
 
     // ── unit tests ───────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ const config = require('../config');
 const db = require('../db/schema');
 const { StellarSdk, isTestnet, server, sorobanServer, networkPassphrase } = require('./stellar-config');
 const logger = require('../logger');
+const { decryptUserSecretKey } = require('./crypto');
 
 function normalizeWasmHash(h) {
   if (h == null || typeof h !== 'string') return null;
@@ -284,11 +285,11 @@ async function simulateContractCall(contractId, method, args = []) {
 /**
  * Invokes a lifecycle action on the Soroban escrow contract and polls until confirmed.
  * Logs every attempt to `contract_invocations`.
- * @param {{ action: 'deposit'|'release'|'refund'|'dispute', senderSecret: string, orderId: number, buyerPublicKey: string, farmerPublicKey: string, amount: number, timeoutUnix: number, userId: number|null, cooperativeAddress?: string|null, cooperativeRoyaltyBps?: number, requestId?: string }} params
+ * @param {{ action: 'deposit'|'release'|'refund'|'dispute'|'resolve_dispute', buyerBps?: number, senderSecret: string, orderId: number, buyerPublicKey: string, farmerPublicKey: string, amount: number, timeoutUnix: number, userId: number|null, cooperativeAddress?: string|null, cooperativeRoyaltyBps?: number, requestId?: string }} params
  * @returns {Promise<{ txHash: string, contractId: string }>}
  * @throws if the contract IDs are unconfigured, submission fails, or confirmation times out after 15 s
  */
-async function invokeEscrowContract({ action, senderSecret, orderId, buyerPublicKey, farmerPublicKey, amount, timeoutUnix, userId, cooperativeAddress, cooperativeRoyaltyBps, releaseAfterUnix, requestId }) {
+async function invokeEscrowContract({ action, senderSecret, orderId, buyerPublicKey, farmerPublicKey, amount, timeoutUnix, userId, cooperativeAddress, cooperativeRoyaltyBps, releaseAfterUnix, buyerBps, requestId }) {
   const contractId = config.sorobanEscrowContractId;
   const xlmTokenContractId = config.sorobanXlmTokenContractId;
   if (!contractId) throw new Error('SOROBAN_ESCROW_CONTRACT_ID is not configured');
@@ -320,10 +321,26 @@ async function invokeEscrowContract({ action, senderSecret, orderId, buyerPublic
       StellarSdk.nativeToScVal(Number(releaseAfterUnix || 0), { type: 'u64' })
     );
   } else if (action === 'release') {
+    // release(order_id, caller). There is deliberately no fee argument: the platform
+    // fee is read from the contract's own storage (set by `initialize`), never from
+    // the caller (#1301). The signer must be the escrow buyer or the platform admin.
     operation = contract.call(
       'release',
-      StellarSdk.nativeToScVal(xlmTokenContractId, { type: 'address' }),
-      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' })
+      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+      StellarSdk.nativeToScVal(keypair.publicKey(), { type: 'address' })
+    );
+  } else if (action === 'resolve_dispute') {
+    // resolve_dispute(order_id, buyer_bps): admin-only; buyer_bps is the buyer's share
+    // in basis points (0 = all to farmer, 10000 = full refund). The contract deducts
+    // the platform fee and cooperative royalty from the farmer's share (#1299).
+    const bps = Number(buyerBps);
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
+      throw new Error('buyerBps must be an integer between 0 and 10000');
+    }
+    operation = contract.call(
+      'resolve_dispute',
+      StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+      StellarSdk.nativeToScVal(bps, { type: 'u32' })
     );
   } else if (action === 'refund') {
     operation = contract.call(
@@ -462,6 +479,69 @@ async function invokeContract({ contractId, method, args = [], signerSecret }) {
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error('Transaction confirmation timeout');
+}
+
+async function recordCarbonOffset({ orderId, kgCo2, verifierPublicKey, verifierSecret }) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  const adminSecret = process.env.CARBON_OFFSET_ADMIN_SECRET;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  if (!adminSecret) throw new Error('CARBON_OFFSET_ADMIN_SECRET is not configured');
+  if (!verifierSecret) throw new Error('Verifier Stellar secret is not available');
+
+  const numericOrderId = Number(orderId);
+  const numericKgCo2 = Number(kgCo2);
+  if (!Number.isSafeInteger(numericOrderId) || numericOrderId < 0) {
+    throw new Error('orderId must be a non-negative safe integer');
+  }
+  if (!Number.isFinite(numericKgCo2) || numericKgCo2 <= 0) {
+    throw new Error('kgCo2 must be positive');
+  }
+  const verifiedKgCo2 = Math.ceil(numericKgCo2);
+  const verifierKeypair = StellarSdk.Keypair.fromSecret(
+    await decryptUserSecretKey(verifierSecret)
+  );
+  if (verifierKeypair.publicKey() !== verifierPublicKey) {
+    throw new Error('Verifier secret does not match verifierPublicKey');
+  }
+
+  const commonArgs = [
+    { type: 'u64', value: numericOrderId },
+    { type: 'u64', value: verifiedKgCo2 },
+    { type: 'address', value: verifierPublicKey },
+  ];
+  const verifierAuthorization = await invokeContract({
+    contractId,
+    method: 'authorize_offset',
+    args: commonArgs,
+    signerSecret: verifierKeypair.secret(),
+  });
+  const record = await invokeContract({
+    contractId,
+    method: 'record_offset',
+    args: commonArgs,
+    signerSecret: adminSecret,
+  });
+
+  return {
+    contractId,
+    verifierTxHash: verifierAuthorization.hash,
+    txHash: record.hash,
+  };
+}
+
+async function getCarbonOffset(orderId) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+
+  const sim = await simulateContractCall(contractId, 'get_offset', [
+    { type: 'u64', value: Number(orderId) },
+  ]);
+  if (!sim.success) {
+    const error = new Error(`Failed to read carbon offset: ${sim.error || 'simulation failed'}`);
+    error.code = 'carbon_offset_read_failed';
+    throw error;
+  }
+  return sim.result ?? null;
 }
 
 /**
@@ -744,6 +824,67 @@ async function deployContract({ wasmBuffer, deployerSecret }) {
   throw new Error('Failed to extract contract ID from transaction result');
 }
 
+async function recordCarbonOffset({ orderId, kgCo2, verifierPublicKey }) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  const adminSecret = process.env.CARBON_OFFSET_ADMIN_SECRET;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  if (!adminSecret) throw new Error('CARBON_OFFSET_ADMIN_SECRET is not configured');
+
+  const keypair = StellarSdk.Keypair.fromSecret(adminSecret);
+  const source = await server.loadAccount(keypair.publicKey());
+  const contract = new StellarSdk.Contract(contractId);
+  let transaction = new StellarSdk.TransactionBuilder(source, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'record_offset',
+        StellarSdk.nativeToScVal(Number(orderId), { type: 'u64' }),
+        StellarSdk.nativeToScVal(Math.round(Number(kgCo2)), { type: 'u64' }),
+        StellarSdk.nativeToScVal(verifierPublicKey, { type: 'address' })
+      )
+    )
+    .setTimeout(60)
+    .build();
+
+  transaction = await sorobanServer.prepareTransaction(transaction);
+  transaction.sign(keypair);
+  const submission = await sorobanServer.sendTransaction(transaction);
+  if (submission.status === 'ERROR') {
+    throw new Error(submission.errorResultXdr || 'Soroban transaction submission failed');
+  }
+
+  const txHash = submission.hash || transaction.hash().toString('hex');
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const result = await sorobanServer.getTransaction(txHash);
+    if (result.status === 'SUCCESS') {
+      await logEscrowInvocation({
+        contractId,
+        method: 'record_offset',
+        args: { orderId, kgCo2, verifierPublicKey },
+        txHash,
+        success: true,
+        error: null,
+        userId: null,
+      });
+      return { txHash, contractId };
+    }
+    if (result.status === 'FAILED') throw new Error('Soroban transaction failed');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error('Soroban transaction confirmation timed out');
+}
+
+async function getCarbonOffset(orderId) {
+  const contractId = process.env.SOROBAN_CARBON_OFFSET_CONTRACT_ID;
+  if (!contractId) throw new Error('SOROBAN_CARBON_OFFSET_CONTRACT_ID is not configured');
+  return simulateContractCall(contractId, 'get_offset', [
+    { type: 'u64', value: Number(orderId) },
+  ]);
+}
+
 module.exports = {
   normalizeWasmHash,
   getContractState,
@@ -752,10 +893,14 @@ module.exports = {
   invokeEscrowContract,
   getEscrowState,
   invokeContract,
+  recordCarbonOffset,
+  getCarbonOffset,
   simulateContract,
   getContractABI,
   analyzeContractFees,
   getContractEvents,
   getContractFunctionSignatures,
   deployContract,
+  recordCarbonOffset,
+  getCarbonOffset,
 };

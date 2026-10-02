@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { FavoritesProvider } from './context/FavoritesContext';
 import { CompareProvider } from './context/CompareContext';
+import { NetworkProvider } from './context/NetworkContext';
 import { LoadingProvider, LoadingContext } from './context/LoadingContext';
 import { setLoadingCallback, setLogoutCallback } from './api/client';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -125,7 +126,9 @@ export default function App() {
           <FavoritesProvider>
             <CompareProvider>
               <LoadingProvider>
-                <AppContent />
+                <NetworkProvider>
+                  <AppContent />
+                </NetworkProvider>
               </LoadingProvider>
             </CompareProvider>
           </FavoritesProvider>

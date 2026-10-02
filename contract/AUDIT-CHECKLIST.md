@@ -29,9 +29,9 @@ covers `npm audit` findings only, not contract logic.
 | `contract::approve` | PASS | `data.payer.require_auth()` — `contract/src/lib.rs:106` |
 | `contract::cancel` | PASS | `data.payer.require_auth()` — `contract/src/lib.rs:136` |
 | `contract::expire` | PASS | `data.payer.require_auth()` — `contract/src/lib.rs:166` |
-| `reward-token::mint` | PASS | stored `admin.require_auth()` — `contract/reward-token/src/lib.rs:39` |
+| `reward-token::mint` | PASS | stored `minter.require_auth()` — `contract/reward-token/src/lib.rs` |
 | `reward-token::transfer` | PASS | `from.require_auth()` — `contract/reward-token/src/lib.rs:61` |
-| `carbon-offset::record_offset` | PASS | stored `admin.require_auth()` — `contract/carbon-offset/src/lib.rs:45` |
+| `carbon-offset::record_offset` | PASS | stored admin requires auth, and the named verifier must first authorize the exact order/amount — `contract/carbon-offset/src/lib.rs` |
 | `grant_role` / `upgrade` / `pause` / `set_fee_rate` | N/A | None of these functions exist in the current contracts. If access control roles, upgradability, pausability, or a configurable fee rate are added later, each must gate on a stored admin/role address with `require_auth()` before this checklist item can be marked PASS. |
 
 ## 3. TTL expiry risk
@@ -40,8 +40,8 @@ covers `npm audit` findings only, not contract logic.
 |---|---|---|
 | `contracts/escrow` | **FAIL** — persistent storage entries (`DataKey::Escrow(order_id)`) were never bumped after the initial write; a long-lived escrow (e.g. a preorder with a distant deadline) could be archived before `release`/`refund`/`dispute` is called, making the entry unreadable. | Added `env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_AMOUNT)` after every write in `deposit`, `release`, `refund`, `dispute` — `contracts/escrow/src/lib.rs`. |
 | `contract` (freelancer escrow) | **FAIL** — same issue on instance storage. | Added `env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_AMOUNT)` after every write in `create`, `submit_work`, `approve`, `cancel`, `expire` — `contract/src/lib.rs`. |
-| `contract/carbon-offset` | PASS | `extend_ttl` was included on the persistent offset key from the start — `contract/carbon-offset/src/lib.rs`. |
-| `reward-token` | **FAIL (not yet fixed)** | Balance/metadata entries are never TTL-bumped. Not remediated in this pass — tracked as a follow-up since reward-token is not part of the escrow audit scope for this issue, but should be fixed before mainnet. |
+| `contract/carbon-offset` | PASS | Offset, verifier-approval, void marker, and instance storage TTLs are refreshed after writes — `contract/carbon-offset/src/lib.rs`. |
+| `reward-token` | PASS | Balance entries now use a shared write helper that extends persistent TTL on every balance change — `contract/reward-token/src/lib.rs`. |
 
 ## 4. Reentrancy via cross-contract calls
 
@@ -68,7 +68,7 @@ double-spend the escrow before the original call's storage write lands.
 | `contracts/escrow` | PASS | Keyed by `DataKey::Escrow(order_id)` — one entry per order, no collision across orders. |
 | `contract` (freelancer escrow) | PASS | Single `symbol_short!("escrow")` instance key — by design, one escrow per deployed contract instance, so there is nothing else in instance storage to collide with. |
 | `reward-token` | PASS | `ADMIN`/`METADATA` are instance keys; `(BALANCE, address)` tuple keys are persistent — distinct namespaces, no overlap. |
-| `carbon-offset` | PASS | Keyed by `DataKey::Offset(order_id)`; `ADMIN` is a separate instance key. |
+| `carbon-offset` | PASS | Offset, verification, and void status use distinct `DataKey` variants; `ADMIN` and `PENDING_ADMIN` are instance symbols. |
 
 ## Summary
 
@@ -79,3 +79,21 @@ The reward-token TTL gap is logged as a known follow-up (not an escrow contract,
 scope for this issue's remediation). Fee-arithmetic and role/pause/upgrade auth items
 are marked N/A because those features don't exist yet — this checklist should be
 re-run against them before they ship.
+
+## Cooperative multisig invariants (`contracts/escrow`, #1296–#1298)
+
+- `set_coop(coop, members, threshold)` **must** enforce `1 <= threshold <= members.len()` and reject
+  duplicate member keys (`InvalidCoopConfig`). `multisig_release` has no `require_auth`; the
+  signature count is its only protection, so a zero threshold would let anyone release any escrow.
+  `multisig_release` re-checks `threshold != 0` to guard against legacy stored configs.
+- Config is keyed per cooperative (`DataKey::CoopConfig(Address)`) and `multisig_release` loads the
+  config for `escrow.cooperative_address`; escrows without a cooperative cannot use it.
+- Signed payload: `sha256(contract_address_xdr || order_id_be_u64)` (`Address::to_xdr`, then 8 big-endian
+  bytes). Signers (backend/CLI) must build this exact message per deployment.
+- Settlement applies the same token check, `release_after_unix` lock, platform fee, cooperative royalty,
+  events and buyer rewards as `release()`.
+- **Migration:** the old single `DataKey::CoopConfig` entry is no longer read. After upgrading, the admin
+  must call `set_coop` once per cooperative address, and signers must re-sign with the new payload.
+This checklist now reflects the additional reward-token and carbon-offset hardening:
+balance TTL bumps, minter authorization, supply/fee bounds, verifier approval, and
+record amendment/void paths. Re-run the checklist when contract behavior changes.

@@ -111,21 +111,22 @@ Migrations run automatically on app startup — no manual step needed for develo
 
 ### How it works
 
-- Migration files: `backend/migrations/NNN_description.sql`
+- Migration files: `backend/migrations/NNN_description.sql`; the complete filename is the migration identity.
 - Rollback files:  `backend/migrations/NNN_description.undo.sql` (optional)
 - Applied migrations are tracked in a `migrations` table in the database
 - Running `migrate` twice is safe — already-applied migrations are skipped
+- Historical migrations reuse numeric prefixes. The runner orders complete filenames lexically, so do not rename or renumber existing migrations; use a new, unique prefix greater than the current highest (`033`) for each new migration.
 
 ### Creating a new migration
 
 ```bash
 # Up migration
 echo "ALTER TABLE products ADD COLUMN featured INTEGER DEFAULT 0;" \
-  > backend/migrations/002_add_featured.sql
+  > backend/migrations/034_add_featured.sql
 
 # Rollback (optional)
 echo "ALTER TABLE products DROP COLUMN IF EXISTS featured;" \
-  > backend/migrations/002_add_featured.undo.sql
+  > backend/migrations/034_add_featured.undo.sql
 
 npm run migrate
 ```
@@ -404,6 +405,51 @@ DEPOSIT_XLM=2 FEE_BPS=500 SKIP_BUILD=1 ./contract/test-futurenet.sh
 
 ---
 
+## Workspace Escrow Settlement (`contracts/escrow/`)
+
+Every path that pays a farmer goes through one private routine,
+`settle_to_farmer`, so they all produce identical balances:
+
+| Entry point | Who may call | Notes |
+|-------------|--------------|-------|
+| `release(order_id, caller)` | escrow buyer or platform admin | |
+| `release_to_stream(order_id, rate, end_time)` | escrow buyer | farmer's net amount is booked as a payment stream instead of transferred |
+| `batch_release(order_ids)` | platform address | per-item failures are reported, not fatal |
+| `auto_release(order_id)` | anyone, after `auto_release_unix` | |
+| `multisig_release(order_id, signatures)` | cooperative M-of-N signers | |
+
+`settle_to_farmer` checks the escrow is `Active`, enforces the pre-order lock
+(`release_after_unix`), checks the token recorded at deposit, deducts the platform fee and the
+cooperative royalty, transfers, marks the escrow `Released`, emits the release event and
+attempts the best-effort reward mint.
+
+**The platform fee is never a caller input.** It is read from the value stored by
+`initialize(admin, fee_bps, fee_destination)`. On a deployment where `initialize` was never
+called every settlement path fails with `NotInitialized` (see the legacy-deployment note in
+[`docs/escrow-migration-runbook.md`](docs/escrow-migration-runbook.md)).
+
+### Dispute resolution
+
+`resolve_dispute(order_id, buyer_bps)` (admin only) splits a disputed escrow. `buyer_bps` is
+the buyer's share in basis points, `0..=10_000` (`0` = all to the farmer, `10_000` = full
+refund, `6_000` = 60/40).
+
+- `buyer_amount = amount * buyer_bps / 10_000`, **rounded down**.
+- The rounding remainder therefore always stays with the farmer side
+  (`farmer_gross = amount - buyer_amount`), so the two shares sum to `amount` exactly.
+- The buyer share is refunded untouched. The farmer share has the platform fee and cooperative
+  royalty deducted, exactly as in `release`.
+- Final status is `Refunded` for `buyer_bps = 10_000`, otherwise `Released`.
+- Emits `("escrow", "resolved")` with `(order_id, buyer_amount, farmer_amount, fee_amount)`,
+  where `farmer_amount` is the farmer's net payout.
+- All failures are typed `EscrowError`s (`InvalidAmount`, `NotFound`, `NotInDispute`,
+  `InvalidToken`, `NotInitialized`); the function does not panic.
+
+The backend maps `PATCH /api/disputes/:id/resolve` (`buyer` / `farmer` / `split` with
+`split_percent_buyer`) onto `buyer_bps` (`percent * 100`, rounded to a whole basis point).
+
+---
+
 ## Legacy Soroban Escrow Contract (`contract/`)
 
 The `contract/` directory contains the legacy Soroban escrow contract that
@@ -442,14 +488,24 @@ These codes are stable on-chain ABI values. Never reuse a code, even after remov
 | 14 | `AlreadyInitialized` | `initialize` called more than once |
 | 15 | `NotAdmin` | Caller does not hold the admin role |
 | 16 | `BelowMinDeposit` | Deposit amount is below the configured minimum (dust guard) |
-| 17 | `BatchTooLarge` | `batch_release` called with more than `MAX_BATCH_RELEASE` IDs |
+| 17 | `BatchTooLarge` | `batch_release` / `batch_deposit` called with more than 20 entries |
 | 18 | `SnapshotNotFound` | No snapshot exists for the requested (order_id, ledger_sequence) |
 | 19 | `NotYetReleasable` | Release called before the pre-order unlock date |
 | 20 | `SubmissionWindowClosed` | Evidence submission window (48 h) has closed |
 | 21 | `AutoReleaseNotReached` | Auto-release timestamp has not yet been reached |
 | 22 | `TooManyCoopSigners` | Cooperative signer count exceeds `MAX_COOP_SIGNERS` |
+| 23 | `InvalidTimeout` | Deposit timeout is shorter than `MIN_TIMEOUT_SECS` from now |
+| 24 | `InvalidOrderId` | `order_id` is at or above `MAX_ORDER_ID` |
+| 25 | `InvalidRoyalty` | Cooperative royalty exceeds 10 000 bps (100%) |
+| 26 | `EvidenceLimitReached` | Party already submitted the maximum number of evidence hashes |
+| 27 | `NotDisputed` | Operation requires the escrow to be disputed |
+| 28 | `NotInitialized` | Admin not configured; `initialize` has not been called |
 
-Next available code: **23**. See the `NEXT_CODE` comment in `contracts/escrow/src/lib.rs` for the authoritative value.
+Next available code: **29**. See the `NEXT_CODE` comment in `contracts/escrow/src/lib.rs` for the authoritative value.
+| 23 | `NotInitialized` | A stored value settlement depends on (platform fee, fee destination, admin) is missing because `initialize` was never called |
+| 24 | `NotInDispute` | `resolve_dispute` called on an escrow that is not in the `Disputed` state |
+
+Next available code: **25**. See the `NEXT_CODE` comment in `contracts/escrow/src/lib.rs` for the authoritative value.
 
 ### Build & Test
 
@@ -511,3 +567,27 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1383 -->
 - #1383: Dashboard CSV/JSON export sends no auth token, uses the deprecated prefix, and saves error bodies as files
+<!-- handsoff-issue-1302 -->
+- #1302: `set_auto_release_days` has no bounds, so an admin can set `0` and allow instant permissionless release
+
+<!-- handsoff-issue-1303 -->
+- #1303: `set_admin` is a single-step admin replacement that bypasses the two-step transfer
+
+<!-- handsoff-issue-1304 -->
+- #1304: Separate the "platform operator" role from the "fee destination" address (`init` vs `initialize`)
+<!-- handsoff-issue-1312 -->
+- #1312: Legacy `contract/` escrow never moves tokens: deposit/release/refund are bookkeeping only
+
+<!-- handsoff-issue-1313 -->
+- #1313: Legacy `grant_role` lets anyone claim `Platform` before `initialize`, and `revoke_role` can lock out all admins
+<!-- handsoff-issue-1306 -->
+- #1306: Escrow snapshots are non-durable and can be spammed
+
+<!-- handsoff-issue-1307 -->
+- #1307: Payment-stream `withdraw`/`cancel`/`top_up` take a caller-supplied token address, which can drain other assets
+
+<!-- handsoff-issue-1308 -->
+- #1308: Streams created by `release_to_stream` can never be withdrawn or cancelled
+
+<!-- handsoff-issue-1309 -->
+- #1309: Payment-stream storage entries are never TTL-extended
