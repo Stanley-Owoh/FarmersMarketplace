@@ -325,7 +325,7 @@ function SettingsAccountBody() {
         </div>
       )}
 
-      {showModal &&
+      {showModal && (
         <div style={s.overlay} onClick={closeModal} role="dialog" aria-modal="true" aria-labelledby="modal-title">
           <div style={s.modal} onClick={e => e.stopPropagation()}>
 

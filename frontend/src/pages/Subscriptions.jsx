@@ -204,7 +204,11 @@ export default function Subscriptions() {
                 <div style={s.name}>{sub.product_name}</div>
                 <div style={s.meta}>{sub.quantity} {sub.unit} · {FREQ_LABEL[sub.frequency]}</div>
                 {nextAmount && <div style={s.meta}>Next renewal amount: <strong>{nextAmount}</strong></div>}
-                <div style={s.meta}>Next renewal date: {new Date(sub.next_order_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
+                <div style={s.meta}>
+                  Next renewal date: {sub.next_order_at && !isNaN(new Date(sub.next_order_at))
+                    ? new Date(sub.next_order_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                    : 'Not scheduled'}
+                </div>
                 {sub.next_billing_at ? (
                   <div style={s.meta}>Next billing: {new Date(sub.next_billing_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
                 ) : (
