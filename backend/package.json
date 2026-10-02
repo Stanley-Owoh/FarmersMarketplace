@@ -7,6 +7,7 @@
     "dev": "nodemon src/index.js",
     "test": "jest --forceExit",
     "test:coverage": "jest --forceExit --coverage",
+    "test:handles": "jest --detectOpenHandles tests/jobs.test.js",
     "test:contracts": "SKIP_CONTRACT_TESTS=false jest --forceExit --testPathPattern=escrow.contracts.test",
     "migrate": "node migrate.js",
     "migrate:rollback": "node migrate.js rollback",

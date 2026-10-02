@@ -18,6 +18,8 @@ const logger = require('../logger');
 const { createPerIpRateLimiter } = require('../middleware/rateLimitPerUser');
 const { csrfTokenHandler, generateCsrfToken } = require('../middleware/csrf');
 const { encrypt } = require('../utils/crypto');
+const { issueVerificationToken } = require('../services/emailVerificationService');
+const { sendVerificationEmail } = require('../services/emailService');
 
 const loginRateLimit = createPerIpRateLimiter(
   parseInt(process.env.RATE_LIMIT_LOGIN_MAX || '5', 10),
@@ -90,7 +92,15 @@ const COOKIE_OPTIONS = {
 };
 
 function signAccessToken(payload) {
-  return jwt.sign(payload, process.env.JWT_SECRET || 'secret', { expiresIn: ACCESS_TOKEN_TTL });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: ACCESS_TOKEN_TTL });
+}
+
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || (process.env.NODE_ENV === 'production' && Buffer.byteLength(secret, 'utf8') < 32)) {
+    throw new Error('JWT_SECRET must be configured with at least 32 bytes in production');
+  }
+  return secret;
 }
 
 function generateRefreshToken() {
@@ -216,6 +226,16 @@ router.post('/register', registerRateLimit, validate.register, async (req, res) 
       ]
     );
     const userId = rows[0].id;
+    const verificationToken = await issueVerificationToken(userId);
+    try {
+      await sendVerificationEmail(email, verificationToken);
+    } catch (emailError) {
+      logger.error('registration verification email failed', {
+        userId,
+        error: emailError.message,
+        stack: emailError.stack,
+      });
+    }
     const accessToken = signAccessToken({ id: userId, role });
     const rawRefresh = generateRefreshToken();
     await storeRefreshToken(userId, rawRefresh);
@@ -406,7 +426,7 @@ router.get('/me', auth, async (req, res) => {
 router.get('/stream-token', auth, (req, res) => {
   const token = jwt.sign(
     { id: req.user.id, scope: 'stream' },
-    process.env.JWT_SECRET || 'secret',
+    getJwtSecret(),
     { expiresIn: '60s' }
   );
   res.json({ token, expiresIn: 60 });

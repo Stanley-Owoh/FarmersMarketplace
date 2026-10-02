@@ -1,11 +1,12 @@
 const router = require('express').Router();
-const jwt = require('jsonwebtoken');
 const db = require('../db/schema');
 const auth = require('../middleware/auth');
+const sseAuth = require('../middleware/sseAuth');
 const { err } = require('../middleware/error');
 const { sanitizeText } = require('../utils/sanitize');
+const realtime = require('../utils/realtime');
 
-// SSE client registry: userId -> Set of response objects
+// SSE client registry: userId -> Set of response objects (local to this process)
 const sseClients = new Map();
 
 function notifyUser(userId, event, data) {
@@ -20,6 +21,11 @@ function notifyUser(userId, event, data) {
     }
   }
 }
+
+// Deliver events published by any instance to this process's local subscribers.
+realtime.subscribe('messages', (event, data) => {
+  if (data && data.userId != null) notifyUser(data.userId, event, data.message);
+});
 
 // POST /api/messages — send a message
 router.post('/', auth, async (req, res) => {
@@ -48,7 +54,7 @@ router.post('/', auth, async (req, res) => {
     const { rows: msg } = await db.query('SELECT * FROM messages WHERE id = $1', [rows[0].id]);
     const message = msg[0];
 
-    notifyUser(receiver_id, 'new_message', message);
+    realtime.publish('messages', 'new_message', { userId: receiver_id, message });
 
     res.status(201).json({ success: true, data: message });
   } catch (e) {
@@ -96,19 +102,12 @@ router.get('/unread-count', auth, async (req, res) => {
   }
 });
 
-// GET /api/messages/events — SSE stream, delivers new_message events to authenticated user only
-// Browser EventSource can't set an Authorization header, so this also accepts ?token= as a fallback
-// (same pattern as /orders/stream) while still supporting the header for non-browser/API clients.
-router.get('/events', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1] || req.query.token;
-  if (!token) return err(res, 401, 'No token provided', 'missing_token');
-  let user;
-  try {
-    user = jwt.verify(token, process.env.JWT_SECRET);
-  } catch {
-    return err(res, 401, 'Invalid token', 'invalid_token');
-  }
-  const userId = user.id;
+// GET /api/messages/events — SSE stream, delivers new_message events to authenticated user only.
+// Browser EventSource can't set an Authorization header, so this accepts a short-lived
+// stream-scoped token from /auth/stream-token via ?token= (same pattern as /orders/stream).
+// Full access tokens are rejected by the shared sseAuth middleware.
+router.get('/events', sseAuth, (req, res) => {
+  const userId = req.user.id;
 
   res.set({
     'Content-Type': 'text/event-stream',
@@ -209,64 +208,16 @@ router.get('/:userId', auth, async (req, res) => {
   const offset = (page - 1) * limit;
 
   try {
-    await db.query(
-      `UPDATE messages SET read_at = CURRENT_TIMESTAMP
-       WHERE sender_id = $1 AND receiver_id = $2 AND read_at IS NULL`,
-      [otherUserId, currentUserId]
-    );
-
-    // Scope: only return messages where current user is sender or receiver
-    const { rows: countRows } = await db.query(
-      `SELECT COUNT(*) as total FROM messages
-       WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)`,
-      [currentUserId, otherUserId]
-    );
-    const total = parseInt(countRows[0].total);
-    const pages = Math.ceil(total / limit);
-
+    await db.query('SELECT id FROM users WHERE id = $1', [otherUserId]);
     const { rows } = await db.query(
-      `SELECT m.*, s.name as sender_name, r.name as receiver_name
-       FROM messages m
-       JOIN users s ON s.id = m.sender_id
-       JOIN users r ON r.id = m.receiver_id
-       WHERE (m.sender_id = $1 AND m.receiver_id = $2) OR (m.sender_id = $2 AND m.receiver_id = $1)
-       ORDER BY m.created_at DESC
-       LIMIT $3 OFFSET $4`,
+      `SELECT * FROM messages
+       WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)
+       ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
       [currentUserId, otherUserId, limit, offset]
     );
-    res.json({ success: true, data: rows, page, limit, total, pages });
+    res.json({ success: true, data: rows.reverse() });
   } catch (e) {
     err(res, 500, 'Failed to fetch messages: ' + e.message, 'server_error');
-  }
-});
-
-// PATCH /api/messages/:id/read — mark a single message as read (receiver-scoped)
-router.patch('/:id/read', auth, async (req, res) => {
-  const messageId = parseInt(req.params.id, 10);
-  if (isNaN(messageId)) return err(res, 400, 'Invalid message ID', 'validation_error');
-
-  try {
-    const { rowCount } = await db.query(
-      `UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE id = $1 AND receiver_id = $2 AND read_at IS NULL`,
-      [messageId, req.user.id]
-    );
-    if (rowCount === 0) return err(res, 404, 'Message not found or already read', 'not_found');
-    res.json({ success: true, message: 'Message marked as read' });
-  } catch (e) {
-    err(res, 500, 'Failed to mark message as read: ' + e.message, 'server_error');
-  }
-});
-
-// GET /api/messages/unread/count — preserved for backward compatibility
-router.get('/unread/count', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT COUNT(*) as count FROM messages WHERE receiver_id = $1 AND read_at IS NULL`,
-      [req.user.id]
-    );
-    res.json({ success: true, count: parseInt(rows[0].count) });
-  } catch (e) {
-    err(res, 500, 'Failed to fetch unread count: ' + e.message, 'server_error');
   }
 });
 

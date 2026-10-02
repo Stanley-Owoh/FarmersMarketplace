@@ -3,7 +3,7 @@
  * Tests contract invocation audit logging
  */
 
-const { recordContractInvocation, ARGS_LIMIT } = require('../jobs/contractAudit');
+const { recordContractInvocation, ARGS_LIMIT } = require('../utils/contractAudit');
 const db = require('../db/schema');
 
 jest.mock('../db/schema');
