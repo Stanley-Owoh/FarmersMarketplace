@@ -65,7 +65,7 @@ async function request(path, options = {}, retry = true) {
   const csrfToken = needsCsrf ? getCsrfToken() : null;
   const isFormData = options.body instanceof FormData;
 
-  if (loadingCallback) loadingCallback(true);
+  if (loadingCallback && !options.silent) loadingCallback(true);
   try {
     const headers = {};
     if (!isFormData) headers['Content-Type'] = 'application/json';
@@ -103,7 +103,7 @@ async function request(path, options = {}, retry = true) {
     }
     return data;
   } finally {
-    if (loadingCallback) loadingCallback(false);
+    if (loadingCallback && !options.silent) loadingCallback(false);
   }
 }
 
@@ -246,6 +246,7 @@ export const api = {
   getWalletStreamUrl: () => `/api/wallet/stream?token=${encodeURIComponent(accessToken || '')}`,
   getOrdersStreamUrl: () => `/api/orders/stream?token=${encodeURIComponent(accessToken || '')}`,
   getMessagesStreamUrl: () => `/api/messages/events?token=${encodeURIComponent(accessToken || '')}`,
+  getStockStreamUrl: (productId) => `${BASE}/products/${encodeURIComponent(productId)}/stock-stream`,
   getUnreadMessageCount: () => request('/messages/unread-count'),
 
   getFarmer: (id) => request(`/farmers/${id}`),
@@ -337,7 +338,8 @@ export const api = {
   getAddresses: () => request('/addresses'),
 
   placeOrderWithBudgetOverride: (body) => request('/orders', { method: 'POST', body: { ...body, budget_override_confirmed: true } }),
-  getOrderStatus: (id) => request(`/orders/${id}/status`),
+  getOrderStatus: (id) => request(`/orders/${id}/status`, { silent: true }),
+  getOrderPaymentLink: (orderId) => request(`/orders/${orderId}/payment-link`),
   getOrderPaymentLinkQr: (orderId) => `/api/orders/${orderId}/payment-link/qr`,
 
   getAuctions: () => request('/auctions'),

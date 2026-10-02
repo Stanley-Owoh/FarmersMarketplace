@@ -482,7 +482,30 @@ fn test_partial_refund_with_valid_amount_succeeds() {
 
     let record = client.get_escrow(&order_id).unwrap();
     assert_eq!(record.status, EscrowStatus::Refunded);
-    assert_eq!(record.amount, 400_000);
+    assert_eq!(record.amount, 1_000_000);
+    assert_eq!(client.refunded_amount(&order_id).unwrap(), Some(400_000));
+}
+
+#[test]
+fn test_refund_requires_buyer_authorization() {
+    let env = setup_env();
+    env.mock_all_auths();
+    let client = register_contract(&env);
+    init_zero_fee(&env, &client);
+    let buyer = Address::generate(&env);
+    let farmer = Address::generate(&env);
+    let order_id: u64 = 203;
+    let timeout = future_timeout(&env);
+    let (pname, price) = dummy_product(&env);
+
+    client
+        .deposit(&order_id, &buyer, &farmer, &1_000_000, &timeout, &pname, &price)
+        .unwrap();
+    advance_past_timeout(&env, timeout);
+    env.mock_auths(&[]);
+
+    assert!(client.try_refund(&order_id, &None).is_err());
+    assert_eq!(client.get_escrow(&order_id).unwrap().status, EscrowStatus::Active);
 }
 
 #[test]

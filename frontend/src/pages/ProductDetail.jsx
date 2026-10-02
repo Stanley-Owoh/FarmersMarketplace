@@ -444,16 +444,39 @@ export default function ProductDetail() {
   }, []);
 
   useEffect(() => {
-    if (!id) return;
-    const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:4000';
-    const es = new EventSource(`${apiBase}/api/products/${id}/stock-stream`);
-    es.onmessage = (e) => {
-      try {
-        const { quantity } = JSON.parse(e.data);
-        setLiveStock(quantity);
-      } catch { /* ignore malformed events */ }
+    if (!id || typeof EventSource === 'undefined' || typeof api.getStockStreamUrl !== 'function') return;
+    let eventSource;
+    let reconnectTimer;
+    let reconnectDelay = 1000;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      eventSource = new EventSource(api.getStockStreamUrl(id));
+      eventSource.onmessage = (event) => {
+        try {
+          const { quantity } = JSON.parse(event.data);
+          setLiveStock(quantity);
+        } catch { /* ignore malformed events */ }
+      };
+      eventSource.onopen = () => { reconnectDelay = 1000; };
+      eventSource.onerror = () => {
+        eventSource.close();
+        if (closed || reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      };
     };
-    return () => es.close();
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (eventSource) eventSource.close();
+    };
   }, [id]);
 
   // Load auction details if product is auction
@@ -643,12 +666,17 @@ export default function ProductDetail() {
 
     setWalletLoading(true);
     try {
+      const idempotencyKey = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
+        const value = Math.floor(Math.random() * 16);
+        return (character === 'x' ? value : (value & 0x3) | 0x8).toString(16);
+      });
       const orderRes = await api.placeOrder({
         product_id: product.id,
         quantity: qty,
         address_id: selectedAddressId || undefined,
         coupon_code: couponResult ? couponCode.trim() : undefined,
-      });
+        payment_method: 'sep7',
+      }, idempotencyKey);
       const linkRes = await api.getOrderPaymentLink(orderRes.orderId);
       setWalletOrderId(orderRes.orderId);
       setPaymentLink(linkRes.paymentLink);
@@ -657,9 +685,8 @@ export default function ProductDetail() {
 
       const interval = setInterval(async () => {
         try {
-          const ordersRes = await api.getOrders({ product_id: product.id });
-          const order = ordersRes.data.find(o => o.id === orderRes.orderId);
-          if (order && order.status === 'paid') {
+          const order = await api.getOrderStatus(orderRes.orderId);
+          if (order.status === 'paid') {
             if (mountedRef.current) setWalletStatus('paid');
             if (walletPollingIntervalRef.current) {
               clearInterval(walletPollingIntervalRef.current);
@@ -669,7 +696,7 @@ export default function ProductDetail() {
               clearTimeout(walletPollingTimeoutRef.current);
               walletPollingTimeoutRef.current = null;
             }
-          } else if (order && order.status === 'failed') {
+          } else if (order.status === 'failed') {
             if (mountedRef.current) setWalletStatus('failed');
             if (walletPollingIntervalRef.current) {
               clearInterval(walletPollingIntervalRef.current);
