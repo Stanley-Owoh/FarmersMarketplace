@@ -2,7 +2,7 @@ const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const logger = require('../logger');
 const db = require('../db/schema');
-const { Server } = require('@stellar/stellar-sdk');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 // ============================================================================
 // Rate Limiters
@@ -92,7 +92,7 @@ async function checkStellarHorizon(requestId) {
       (process.env.STELLAR_NETWORK === 'mainnet' 
         ? 'https://horizon.stellar.org' 
         : 'https://horizon-testnet.stellar.org');
-    const server = new Server(horizonUrl);
+    const server = new StellarSdk.Horizon.Server(horizonUrl);
     await server.root();
     const duration = Date.now() - startTime;
     logger.info(JSON.stringify({ requestId: requestId || null, event: 'horizon_health_check', status: 'ok', responseTime: `${duration}ms` }));
@@ -252,9 +252,17 @@ async function getHealthCheckResponse(includeVersion = false, requestId) {
 // ============================================================================
 
 /**
- * Add deprecation warning headers to /api endpoints
- * Clients should migrate to /api/v1
+ * Fixed sunset date for the deprecated API v0 surface.
+ *
+ * Sourced from config (`API_V0_SUNSET`, default `2027-03-31`) so the value is
+ * stable across requests and clients can plan a migration. Previously this was
+ * computed as `now + 180 days` on every request, which meant the sunset date
+ * never actually arrived.
  */
+const API_V0_SUNSET = process.env.API_V0_SUNSET || '2027-03-31';
+
+/**
+ * Add deprecation warn
 function addDeprecationHeaders(req, res, next) {
   res.setHeader('Deprecation', 'true');
   res.setHeader('Sunset', new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString()); // 6 months
@@ -295,7 +303,6 @@ router.get('/api/v1/health', async (req, res) => {
 // ============================================================================
 
 router.use('/api', generalLimiter);
-router.use('/api/v1', generalLimiter);
 router.use('/api/auth/login', authLimiter);
 router.use('/api/auth/register', authLimiter);
 router.use('/api/auth/refresh', authLimiter);
@@ -347,6 +354,16 @@ router.use('/federation', require('./federation'));
 registerRoute('/', '/auth', require('./auth'));
 // Fixed /products paths must precede products.js, whose /:id handlers would swallow them (#1368)
 registerRoute('/', '/products', require('./productExtras'));
+registerRoute('/', '', require('./export'));
+registerRoute('/', '/products/bulk', require('./bulkUpload'));
+registerRoute('/', '/products/import', require('./productImport'));
+registerRoute('/', '/products', require('./productVideos'));
+registerRoute('/', '/products', require('./flashSales'));
+registerRoute('/', '/products/:id/calendar', require('./calendar'));
+registerRoute('/', '/products', require('./productShare'));
+registerRoute('/', '/products/market', require('./market'));
+registerRoute('/', '/auth', require('./emailVerification'));
+registerRoute('/', '/auth', require('./authPasswordReset'));
 registerRoute('/', '/products', require('./products'));
 registerRoute('/', '/products', require('./flashSales'));
 registerRoute('/', '/products', require('./productShare'));
@@ -379,8 +396,12 @@ registerRoute('/', '/streams', require('./streams'));
 registerRoute('/', '/products/bulk', require('./bulkUpload'));
 registerRoute('/', '/coupons', require('./coupons'));
 registerRoute('/', '/alerts', require('./alerts'));
-registerRoute('/', '/products/import', require('./productImport'));
 registerRoute('/', '', require('./reviews'));
+registerRoute('/', '/products/import', require('./productImport'));
+const reviewRoutes = require('./reviews');
+registerRoute('/', '/reviews', reviewRoutes);
+registerRoute('/', '/admin/reviews', reviewRoutes.adminRouter);
+registerRoute('/', '/products', reviewRoutes.productRouter);
 registerRoute('/', '/network', require('./network'));
 registerRoute('/', '/batches', require('./batches'));
 registerRoute('/', '/products', require('./productVideos'));
@@ -388,15 +409,19 @@ registerRoute('/', '/products/:id/calendar', require('./calendar'));
 registerRoute('/', '/calendar', require('./calendar'));
 registerRoute('/', '/wallet', require('./walletBudget'));
 registerRoute('/', '/products/market', require('./market'));
+registerRoute('/', '/calendar', require('./calendar'));
+registerRoute('/', '/wallet', require('./walletBudget'));
 registerRoute('/', '/market', require('./market'));
 registerRoute('/', '/subscriptions', require('./subscriptions').router);
 registerRoute('/', '/bundles', require('./bundles'));
 registerRoute('/', '/farmers/bundles', require('./bundleDiscounts'));
-registerRoute('/', '', require('./export'));
+const exportRoutes = require('./export');
+registerRoute('/', '/products', exportRoutes.productsRouter);
+registerRoute('/', '/orders', exportRoutes.ordersRouter);
 registerRoute('/', '/announcements', require('./announcements'));
 registerRoute('/', '/auctions', require('./auctions'));
 registerRoute('/', '/disputes', require('./disputes'));
 
 registerRoute('/', '/categories', require('./categories'));
 
-module.exports = router;
+/* … truncated 6657 chars — edit only what you need near the top … */

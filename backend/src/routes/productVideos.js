@@ -15,14 +15,26 @@ const MAX_DURATION_SECS = 120;
 const MAX_VIDEOS_PER_PRODUCT = 3;
 const ALLOWED = ['video/mp4', 'video/webm'];
 
+// Magic-byte signatures for the video containers we accept. The client-supplied
+// MIME type is never trusted; the stored extension is derived from these bytes.
+const VIDEO_SIGNATURES = [
+  { ext: '.mp4', mime: 'video/mp4', matches: (b) => b.length >= 12 && b.toString('ascii', 4, 8) === 'ftyp' },
+  { ext: '.webm', mime: 'video/webm', matches: (b) => b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3 },
+];
+
+function detectVideoType(buffer) {
+  return VIDEO_SIGNATURES.find((sig) => sig.matches(buffer)) || null;
+}
+
 const uploadsDir = path.join(__dirname, '../../uploads/videos');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: uploadsDir,
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || '.mp4').toLowerCase() || '.mp4';
-    cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`);
+    // Never trust originalname for the extension; use a neutral placeholder and
+    // rename after magic-byte detection.
+    cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}.upload`);
   },
 });
 
@@ -76,6 +88,28 @@ router.post('/:id/videos', auth, (req, res) => {
     if (!req.file) return err(res, 400, 'No video file provided', 'no_file');
 
     try {
+      // Validate magic bytes and derive the stored extension from the detected
+      // container type — never from the client-supplied originalname.
+      const header = Buffer.alloc(16);
+      const fd = fs.openSync(req.file.path, 'r');
+      let bytesRead = 0;
+      try {
+        bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const detected = detectVideoType(header.subarray(0, bytesRead));
+      if (!detected) {
+        fs.unlinkSync(req.file.path);
+        return err(res, 415, 'Only MP4 and WebM videos are allowed', 'unsupported_media_type');
+      }
+
+      const safeName = `${path.basename(req.file.filename, path.extname(req.file.filename))}${detected.ext}`;
+      const safePath = path.join(uploadsDir, safeName);
+      fs.renameSync(req.file.path, safePath);
+      req.file.path = safePath;
+      req.file.filename = safeName;
+
       // Ownership check
       const ownerQ = db.isPostgres
         ? 'SELECT id FROM products WHERE id = $1 AND farmer_id = $2'

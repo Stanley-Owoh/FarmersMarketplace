@@ -93,7 +93,7 @@ async function request(path, options = {}, retry = true, csrfRetry = true) {
   const csrfToken = needsCsrf ? getCsrfToken() : null;
   const isFormData = options.body instanceof FormData;
 
-  if (loadingCallback) loadingCallback(true);
+  if (loadingCallback && !options.silent) loadingCallback(true);
   try {
     const headers = {};
     if (!isFormData) headers['Content-Type'] = 'application/json';
@@ -136,7 +136,7 @@ async function request(path, options = {}, retry = true, csrfRetry = true) {
     }
     return data;
   } finally {
-    if (loadingCallback) loadingCallback(false);
+    if (loadingCallback && !options.silent) loadingCallback(false);
   }
 }
 
@@ -174,7 +174,7 @@ export const api = {
 
   getProducts: (filters = {}) => request(`/products${toQs(filters)}`),
   getCategories: () => request('/products/categories'),
-  getProduct: (id) => request(`/products/${id}`),
+  getProduct: (id, options) => request(`/products/${id}`, options),
   createProduct: (body) => request('/products', { method: 'POST', body }),
   getMyProducts: () => request('/products/mine/list'),
   getHarvestBatches: () => request('/batches'),
@@ -298,6 +298,7 @@ export const api = {
   getWalletStreamUrl: () => `/api/wallet/stream?token=${encodeURIComponent(accessToken || '')}`,
   getOrdersStreamUrl: () => `/api/orders/stream?token=${encodeURIComponent(accessToken || '')}`,
   getMessagesStreamUrl: () => `/api/messages/events?token=${encodeURIComponent(accessToken || '')}`,
+  getStockStreamUrl: (productId) => `${BASE}/products/${encodeURIComponent(productId)}/stock-stream`,
   getUnreadMessageCount: () => request('/messages/unread-count'),
 
   getFarmer: (id) => request(`/farmers/${id}`),
@@ -396,6 +397,9 @@ export const api = {
       headers: { 'X-Idempotency-Key': requireIdempotencyKey(idempotencyKey) },
     }),
   getOrderStatus: (id) => request(`/orders/${id}/status`),
+  placeOrderWithBudgetOverride: (body) => request('/orders', { method: 'POST', body: { ...body, budget_override_confirmed: true } }),
+  getOrderStatus: (id) => request(`/orders/${id}/status`, { silent: true }),
+  getOrderPaymentLink: (orderId) => request(`/orders/${orderId}/payment-link`),
   getOrderPaymentLinkQr: (orderId) => `/api/orders/${orderId}/payment-link/qr`,
 
   getAuctions: () => request('/auctions'),

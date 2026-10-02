@@ -3,8 +3,15 @@ require('dotenv').config();
 const logger = require('./logger');
 const REQUIRED_ENV = ['JWT_SECRET'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-if (missing.length) {
-  logger.error(`[FATAL] Missing required environment variables: ${missing.join(', ')}`);
+const weakJwtSecret =
+  process.env.NODE_ENV === 'production' &&
+  Buffer.byteLength(process.env.JWT_SECRET || '', 'utf8') < 32;
+if (missing.length || weakJwtSecret) {
+  logger.error(
+    `[FATAL] ${missing.length
+      ? `Missing required environment variables: ${missing.join(', ')}`
+      : 'JWT_SECRET must be at least 32 bytes in production'}`
+  );
   logger.error('Copy backend/.env.example to backend/.env and fill in the values.');
   process.exit(1);
 }
@@ -23,8 +30,13 @@ const { notFoundHandler } = require('./middleware/error');
 const { sanitizeResponse } = require('./middleware/sanitize');
 const requestLogger = require('./middleware/requestLogger');
 const categoriesRouter = require('./routes/categories');
+const db = require('./db/schema');
 
 const app = express();
+
+app.use((req, res, next) => {
+  Promise.resolve(db.ready).then(() => next(), next);
+});
 
 // Configure proxy trust based on environment
 // In production, set TRUST_PROXY to the number of proxies or 'true' for all
@@ -80,27 +92,36 @@ app.use(
   })
 );
 
-app.use((req, res, next) => {
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'"
-  );
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  next();
-});
-
 app.use(express.json());
 app.use(cookieParser());
 app.use(sanitizeResponse);
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos')));
+
+// #1360: Serve uploaded files with hardened headers so a stored file can never
+// be interpreted as active content (HTML/SVG) on the API origin. The restrictive
+// CSP, nosniff and inline Content-Disposition with a safe filename neutralise
+// stored-XSS attempts even if a malicious file slips through validation.
+const uploadStaticOptions = {
+  index: false,
+  dotfiles: 'deny',
+  setHeaders: (res, filePath) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; img-src 'self'; media-src 'self'"
+    );
+    const safeName = path.basename(filePath).replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+  },
+};
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), uploadStaticOptions));
+app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos'), uploadStaticOptions));
 
 app.get('/api/csrf-token', csrfTokenHandler);
+app.get('/api/v1/csrf-token', csrfTokenHandler);
 // #836: Also expose at /api/auth/csrf-token for SPA initialization (duplicated for discoverability).
 app.get('/api/auth/csrf-token', csrfTokenHandler);
-app.use('/api/categories', categoriesRouter);
+// #1357: categories is mounted only through registerRoute in ./routes so it
+// goes through the same rate limiter and CSRF ordering as every other router.
 
 // Interactive API documentation
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
@@ -115,5 +136,12 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 // Background jobs are started from src/index.js via jobs/index.js (#1367), never on import.
+app.locals.startBackgroundJobs = () => {
+  if (process.env.NODE_ENV === 'test') return;
+  const { startActivityMonitor } = require('./jobs/activityMonitor');
+  startActivityMonitor();
+  const { startOrphanedUploadsCleanupJob } = require('./jobs/reconcileOrphanedUploads');
+  startOrphanedUploadsCleanupJob();
+};
 
 module.exports = app;

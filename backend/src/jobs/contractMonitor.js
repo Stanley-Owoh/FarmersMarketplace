@@ -9,6 +9,16 @@
  *   refund   → orders.escrow_status = 'refunded', notify buyer
  *   dispute  → orders.escrow_status = 'disputed'
  *
+ * Canonical event shapes (issue #1310):
+ *   Every escrow state transition emits exactly ONE event, using
+ *   `symbol_short!` topics with `order_id` in a consistent position:
+ *
+ *     topics = (symbol "escrow", symbol <action>, symbol <order_id>)
+ *     data   = action-specific tuple (see contracts/escrow/EVENTS.md)
+ *
+ *   The monitor therefore reads the order_id from topic[2] for every action
+ *   and never has to handle legacy string-topic or duplicate variants.
+ *
  * Resume behaviour:
  *   The last processed ledger is persisted in `escrow_monitor_cursor`.
  *   On restart the monitor resumes polling from that ledger + 1 so no events
@@ -93,8 +103,11 @@ async function saveLastLedger(contractId, ledger) {
 // ── event handlers ────────────────────────────────────────────────────────────
 
 /**
- * Extracts the numeric order_id from the event topics array.
- * Escrow events use topic[2] as the order_id (e.g. ["escrow","deposit",<order_id>]).
+ * Extracts the numeric order_id from the canonical event topics array.
+ *
+ * Canonical shape (issue #1310): topics = (symbol "escrow", symbol <action>,
+ * symbol <order_id>). The order_id therefore always lives at topic[2],
+ * regardless of the action, so a single extractor covers every event.
  */
 function extractOrderId(topics) {
   const raw = topics[2];
@@ -206,12 +219,35 @@ async function handleDispute(contractId, topics, data, txHash) {
 
 // ── dispatch ──────────────────────────────────────────────────────────────────
 
+/**
+ * Canonical escrow event actions (issue #1310). Each state transition emits
+ * exactly one event with topics (symbol "escrow", symbol <action>,
+ * symbol <order_id>). Actions without an order_id (admin_*) are handled
+ * separately and are not routed through the order-scoped handlers below.
+ */
+const ORDER_SCOPED_ACTIONS = new Set([
+  'deposit',
+  'release',
+  'refund',
+  'dispute',
+  'resolve',
+  'auto_release',
+  'stream_created',
+  'stream_released',
+  'stream_cancelled',
+]);
+
 async function dispatchEvent(contractId, ev) {
   const topics = ev.topics || [];
-  // Escrow events use topic[0] = 'escrow', topic[1] = action
+  // Canonical escrow events use topic[0] = 'escrow', topic[1] = action.
   if (String(topics[0]) !== 'escrow') return;
   const action = String(topics[1] || '');
   const txHash = ev.id || null;
+
+  // Only the canonical, order-scoped actions are processed here. Legacy
+  // duplicate/string-topic variants are intentionally ignored so a single
+  // settlement is never double-counted.
+  if (!ORDER_SCOPED_ACTIONS.has(action)) return;
 
   switch (action) {
     case 'deposit': return handleDeposit(contractId, topics, ev.data, txHash);
@@ -270,47 +306,10 @@ async function monitorContract(contractId, retryCount = 0) {
       );
     } catch { /* non-fatal */ }
     return;
+      // resolve / auto_release / stream_* share the release-style settlement
+      // semantics: the order is settled and the buyer is notified.
+      return handleRelease(contractId, topics, ev.data, txHash);
   }
-
-  const events = result.events || [];
-  let highestLedger = lastLedger;
-
-  for (const ev of events) {
-    await dispatchEvent(contractId, ev);
-    if (ev.ledger && Number(ev.ledger) > highestLedger) {
-      highestLedger = Number(ev.ledger);
-    }
-  }
-
-  // Persist cursor only when we actually advanced
-  if (highestLedger > lastLedger) {
-    await saveLastLedger(contractId, highestLedger);
-  }
-}
-
-async function runMonitoringJob() {
-  // Use the configured escrow contract if no registry is available
-  const escrowContractId = config.sorobanEscrowContractId;
-
-  let contracts = [];
-  try {
-    const { rows } = await db.query(`SELECT contract_id FROM contracts_registry`);
-    contracts = rows;
-  } catch {
-    // table may not exist in all envs — fall back to config
-  }
-
-  if (escrowContractId && !contracts.some((c) => c.contract_id === escrowContractId)) {
-    contracts.push({ contract_id: escrowContractId });
-  }
-
-  await Promise.all(contracts.map((c) => monitorContract(c.contract_id)));
-}
-
-function startContractMonitor() {
-  logger.info('[ContractMonitor] Starting — polling every 5 minutes');
-  runMonitoringJob();
-  return setInterval(runMonitoringJob, POLL_INTERVAL_MS);
 }
 
 module.exports = {
@@ -321,4 +320,12 @@ module.exports = {
   _cursor: { getLastLedger, saveLastLedger },
   // Re-export audit functions from contractAudit module
   ...require('../utils/contractAudit'),
+  dispatchEvent,
+  extractOrderId,
+  getLastLedger,
+  saveLastLedger,
+  storeInvocation,
+  POLL_INTERVAL_MS,
+  MAX_RETRIES,
+  MAX_BACKOFF_MS,
 };
