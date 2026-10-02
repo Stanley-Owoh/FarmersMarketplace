@@ -35,6 +35,9 @@ const MAX_MIN_DEPOSIT: i128 = 500_000_000;
 /// keeps the transaction under Stellar's operation limit. (#856)
 const MAX_BATCH_RELEASE: u32 = 20;
 
+/// Maximum number of entries accepted by `batch_deposit`. (#1292)
+const MAX_BATCH_DEPOSIT: u32 = 20;
+
 /// Maximum number of cooperative signer slots to prevent unbounded loop cost
 /// in multisig_release. Chosen conservatively below Soroban's per-transaction
 /// instruction budget to ensure signature verification remains efficient. (#979)
@@ -60,6 +63,7 @@ const MAX_INDEX_ENTRIES: u32 = 1_000;
 // Each variant has a stable u32 code that is part of the on-chain ABI.
 // NEVER reuse a code, even after removing a variant.
 // When adding a new variant, use NEXT_CODE and increment it.
+// NEXT_CODE: 29
 // NEXT_CODE: 25
 // NEXT_CODE: 24
 // ---------------------------------------------------------------------------
@@ -89,6 +93,10 @@ pub enum EscrowError {
     /// Caller is not the platform admin or does not hold the required role. (#837)
     NotAdmin = 15,
     /// Deposit amount is below the configured minimum (dust guard). (#857)
+    BelowMinDeposit        = 16,
+    /// `batch_release` / `batch_deposit` was called with more than
+    /// `MAX_BATCH_RELEASE` / `MAX_BATCH_DEPOSIT` entries. (#856, #1292)
+    BatchTooLarge          = 17,
     BelowMinDeposit = 16,
     /// `batch_release` was called with more than `MAX_BATCH_RELEASE` order IDs. (#856)
     BatchTooLarge = 17,
@@ -102,6 +110,18 @@ pub enum EscrowError {
     AutoReleaseNotReached = 21,
     /// Cooperative signer configuration exceeds maximum allowed. (#979)
     TooManyCoopSigners     = 22,
+    /// Deposit timeout is shorter than `MIN_TIMEOUT_SECS` from now. (#1291)
+    InvalidTimeout         = 23,
+    /// `order_id` is at or above `MAX_ORDER_ID`. (#1291)
+    InvalidOrderId         = 24,
+    /// `cooperative_royalty_bps` exceeds 10 000 (100%). (#1291)
+    InvalidRoyalty         = 25,
+    /// Party already submitted `MAX_EVIDENCE_PER_PARTY` evidence hashes. (#1291)
+    EvidenceLimitReached   = 26,
+    /// Operation requires the escrow to be in `Disputed` status. (#1291)
+    NotDisputed            = 27,
+    /// Admin has not been configured; call `initialize` first. (#1291)
+    NotInitialized         = 28,
     /// A stored value required for settlement (platform fee, fee destination or
     /// admin) has not been set: `initialize()` was never called. Settlement fails
     /// closed rather than defaulting to caller-supplied or zero values. (#1301)
@@ -317,18 +337,73 @@ impl EscrowContract {
 
     /// Set the reward token contract address for minting rewards on release (#851).
     /// Admin-only operation.
-    pub fn set_reward_token(env: Env, reward_token_address: Address) {
+    pub fn set_reward_token(env: Env, reward_token_address: Address) -> Result<(), EscrowError> {
         let admin_transfer: AdminTransfer = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         admin_transfer.current_admin.require_auth();
         env.storage()
             .instance()
             .set(&DataKey::RewardTokenContract, &reward_token_address);
         env.events()
             .publish(("reward_token_set",), reward_token_address);
+        Ok(())
+    }
+
+    /// Validation shared by `deposit` and `batch_deposit`. (#1292)
+    ///
+    /// Rejects non-positive amounts, out-of-range order IDs, royalties above
+    /// 100%, amounts below the configured minimum, existing order IDs and
+    /// timeouts shorter than `MIN_TIMEOUT_SECS` from now.
+    fn validate_deposit(
+        env: &Env,
+        order_id: u64,
+        amount: i128,
+        timeout_unix: u64,
+        cooperative_royalty_bps: u32,
+    ) -> Result<(), EscrowError> {
+        // #838: amount must be positive
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+        if order_id >= MAX_ORDER_ID {
+            return Err(EscrowError::InvalidOrderId);
+        }
+        // Royalty bps must not exceed 10 000 (100%)
+        if cooperative_royalty_bps > 10_000 {
+            return Err(EscrowError::InvalidRoyalty);
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        Self::validate_parties(&buyer, &farmer, &cooperative_address, cooperative_royalty_bps)?;
+        let key = DataKey::Escrow(order_id);
+
+        // Royalty bps must not exceed 10 000 (100%)
+        if cooperative_royalty_bps > BPS_DENOMINATOR {
+            return Err(EscrowError::InvalidAmount);
+        }
+        // #857: enforce a minimum deposit to prevent dust escrow records that
+        // cost more to store (Stellar base reserve) than they are worth.
+        let min_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(MIN_DEPOSIT_STROOPS);
+        if amount < min_deposit {
+            return Err(EscrowError::BelowMinDeposit);
+        }
+        // #838: duplicate order_id — immutable, regardless of settlement state
+        let key = DataKey::Escrow(order_id);
+        if env.storage().persistent().has(&key) {
+            return Err(EscrowError::AlreadyExists);
+        }
+        // #838: use env.ledger().timestamp() for timeout validation
+        if env.ledger().timestamp().saturating_add(MIN_TIMEOUT_SECS) > timeout_unix {
+            return Err(EscrowError::InvalidTimeout);
+        }
+        Ok(())
     }
 
     /// Deposit funds into escrow for `order_id`. (#838)
@@ -357,43 +432,10 @@ impl EscrowContract {
     ) -> Result<(), EscrowError> {
         buyer.require_auth();
 
-        // #838: amount must be positive
-        if amount <= 0 {
-            return Err(EscrowError::InvalidAmount);
-        }
-        if order_id >= MAX_ORDER_ID {
-            return Err(EscrowError::InvalidAmount);
-        }
+        Self::validate_deposit(&env, order_id, amount, timeout_unix, cooperative_royalty_bps)?;
 
-        Self::validate_parties(&buyer, &farmer, &cooperative_address, cooperative_royalty_bps)?;
         let key = DataKey::Escrow(order_id);
-
-        // Royalty bps must not exceed 10 000 (100%)
-        if cooperative_royalty_bps > BPS_DENOMINATOR {
-            return Err(EscrowError::InvalidAmount);
-        }
-        // #857: enforce a minimum deposit to prevent dust escrow records that
-        // cost more to store (Stellar base reserve) than they are worth.
-        let min_deposit: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinDeposit)
-            .unwrap_or(MIN_DEPOSIT_STROOPS);
-        if amount < min_deposit {
-            return Err(EscrowError::BelowMinDeposit);
-        }
-
-        // #838: duplicate order_id — immutable, regardless of settlement state
-        let key = DataKey::Escrow(order_id);
-        if env.storage().persistent().has(&key) {
-            return Err(EscrowError::AlreadyExists);
-        }
-
-        // #838: use env.ledger().timestamp() for timeout validation
         let now = env.ledger().timestamp();
-        if now.saturating_add(MIN_TIMEOUT_SECS) > timeout_unix {
-            return Err(EscrowError::InvalidAmount); // reuse InvalidAmount; callers can check message
-        }
 
         let auto_release_days: u64 = env
             .storage()
@@ -516,14 +558,28 @@ impl EscrowContract {
     /// Create multiple escrows in a single transaction to reduce fees (#689).
     ///
     /// Each tuple is `(order_id, buyer, farmer, token, amount, timeout_unix)`.
-    /// All entries are validated before any state is written; if any entry is
-    /// invalid the entire batch is rejected.
+    /// At most `MAX_BATCH_DEPOSIT` entries are accepted. Every entry goes
+    /// through the same validation as `deposit`, duplicate `order_id`s within
+    /// the batch are rejected, and all entries are validated before any state
+    /// is written or tokens move; if any entry is invalid the entire batch is
+    /// rejected. (#1292)
+    ///
+    /// `buyer.require_auth()` is called for every entry, so a batch mixing
+    /// several buyers needs all of their signatures on one transaction. In
+    /// practice a batch should contain a single buyer.
     pub fn batch_deposit(
         env: Env,
         entries: Vec<(u64, Address, Address, Address, i128, u64)>,
     ) -> Result<(), EscrowError> {
+        if entries.len() > MAX_BATCH_DEPOSIT {
+            return Err(EscrowError::BatchTooLarge);
+        }
+
         // Validate all entries first (fail-fast before touching state).
+        let mut seen: Vec<u64> = Vec::new(&env);
         for entry in entries.iter() {
+            let (order_id, _buyer, _farmer, _token, amount, timeout_unix) = entry;
+            if seen.contains(&order_id) {
             let (order_id, buyer, farmer, _token, amount, _timeout) = entry;
             if amount <= 0 {
                 return Err(EscrowError::InvalidAmount);
@@ -532,12 +588,24 @@ impl EscrowContract {
             if env.storage().persistent().has(&DataKey::Escrow(order_id)) {
                 return Err(EscrowError::AlreadyExists);
             }
+            Self::validate_deposit(&env, order_id, amount, timeout_unix, 0)?;
+            seen.push_back(order_id);
         }
+
+        let now = env.ledger().timestamp();
+        let auto_release_days: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AutoReleaseDays)
+            .unwrap_or(Self::DEFAULT_AUTO_RELEASE_DAYS);
 
         for entry in entries.iter() {
             let (order_id, buyer, farmer, token, amount, timeout_unix) = entry;
             buyer.require_auth();
 
+            let escrow = Escrow {
+                buyer: buyer.clone(),
+                farmer,
             let now = env.ledger().timestamp();
             let auto_release_days: u64 = env
                 .storage()
@@ -569,6 +637,10 @@ impl EscrowContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&DataKey::Token(order_id), TTL_MIN, TTL_MAX);
+
+            // Effects before interactions: record is written before the transfer.
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&buyer, &env.current_contract_address(), &amount);
             Self::index_escrow(&env, &buyer, &farmer, order_id);
 
             token::Client::new(&env, &token).transfer(
@@ -1276,23 +1348,44 @@ impl EscrowContract {
             .ok_or(EscrowError::SnapshotNotFound)
     }
 
-    /// Refund funds to the buyer after timeout.
+    /// Refund funds to the buyer after timeout. Requires the buyer's auth.
     ///
-    /// Uses the token stored in the escrow record (#683).
+    /// Uses the token stored in the escrow record (#683). Returns `InDispute`
+    /// while the escrow is disputed, so only `resolve_dispute` can settle it. (#1293)
     pub fn refund(env: Env, order_id: u64) -> Result<(), EscrowError> {
+        Self::refund_after_timeout(env, order_id, true)
+    }
+
+    /// Permissionless claim for timeout refunds. (#1293)
+    ///
+    /// Anyone (e.g. a keeper or the backend cron) may call this once
+    /// `timeout_unix` has passed. No auth is required because the funds can
+    /// only go to `escrow.buyer`. Same checks as `refund` otherwise.
+    pub fn claim_timeout_refund(env: Env, order_id: u64) -> Result<(), EscrowError> {
+        Self::refund_after_timeout(env, order_id, false)
+    }
+
+    fn refund_after_timeout(
+        env: Env,
+        order_id: u64,
+        require_buyer_auth: bool,
+    ) -> Result<(), EscrowError> {
         let mut escrow: Escrow = env
             .storage()
             .persistent()
             .get(&DataKey::Escrow(order_id))
             .ok_or(EscrowError::NotFound)?;
 
-        escrow.buyer.require_auth();
+        if require_buyer_auth {
+            escrow.buyer.require_auth();
+        }
 
         match escrow.status {
             EscrowStatus::Released | EscrowStatus::Refunded => {
                 return Err(EscrowError::AlreadySettled);
             }
-            _ => {}
+            EscrowStatus::Disputed => return Err(EscrowError::InDispute),
+            EscrowStatus::Active => {}
         }
         if env.ledger().timestamp() < escrow.timeout_unix {
             return Err(EscrowError::TimeoutNotReached);
@@ -1334,11 +1427,6 @@ impl EscrowContract {
         Ok(())
     }
 
-    /// Permissionless claim for timeout refunds. Mirrors `refund`.
-    pub fn claim_timeout_refund(env: Env, order_id: u64) -> Result<(), EscrowError> {
-        Self::refund(env, order_id)
-    }
-
     // ── #878: Auto-release (time-lock release) ─────────────────────────────────────
 
     /// Default auto-release days. (#878)
@@ -1350,7 +1438,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         admin_transfer.current_admin.require_auth();
         env.storage()
             .instance()
@@ -1373,8 +1461,12 @@ impl EscrowContract {
             .ok_or(EscrowError::NotFound)?;
 
         // Must be Active (not settled, not disputed, not refunded)
-        if escrow.status != EscrowStatus::Active {
-            return Err(EscrowError::AlreadySettled);
+        match escrow.status {
+            EscrowStatus::Released | EscrowStatus::Refunded => {
+                return Err(EscrowError::AlreadySettled);
+            }
+            EscrowStatus::Disputed => return Err(EscrowError::InDispute),
+            EscrowStatus::Active => {}
         }
 
         if env.ledger().timestamp() < escrow.auto_release_unix {
@@ -1413,7 +1505,7 @@ impl EscrowContract {
             .ok_or(EscrowError::NotFound)?;
 
         if escrow.status != EscrowStatus::Disputed {
-            return Err(EscrowError::InDispute);
+            return Err(EscrowError::NotDisputed);
         }
 
         let is_buyer = true;
@@ -1436,7 +1528,7 @@ impl EscrowContract {
         };
         let evidence_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         if evidence_count >= Self::MAX_EVIDENCE_PER_PARTY {
-            return Err(EscrowError::InvalidAmount); // reuse — max evidence reached
+            return Err(EscrowError::EvidenceLimitReached);
         }
 
         // Store evidence hash
@@ -1487,6 +1579,15 @@ impl EscrowContract {
         (buyer_hashes, farmer_hashes)
     }
 
+    /// Open a dispute. Buyer or farmer only, and only while the escrow is
+    /// `Active`: a second call returns `InDispute` (leaving `dispute_opened_at`
+    /// and the evidence window untouched) and a settled escrow returns
+    /// `AlreadySettled`. (#1294)
+    ///
+    /// Auto-release rule: a dispute may still be opened after
+    /// `auto_release_unix` as long as nobody has called `auto_release` yet.
+    /// Once open, the dispute blocks `auto_release` (it returns `InDispute`),
+    /// so whichever of the two lands first decides the outcome.
     pub fn dispute(env: Env, order_id: u64, caller: Address) -> Result<(), EscrowError> {
         caller.require_auth();
         let mut escrow: Escrow = env
@@ -1502,7 +1603,8 @@ impl EscrowContract {
             EscrowStatus::Released | EscrowStatus::Refunded => {
                 return Err(EscrowError::AlreadySettled);
             }
-            _ => {}
+            EscrowStatus::Disputed => return Err(EscrowError::InDispute),
+            EscrowStatus::Active => {}
         }
 
         // #858: capture a snapshot of the pre-dispute state before mutating it,
@@ -1528,6 +1630,12 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Admin resolves a disputed escrow. Uses the token stored in the record (#683).
+    pub fn resolve_dispute(
+        env: Env,
+        order_id: u64,
+        release_to_farmer: bool,
+    ) -> Result<(), EscrowError> {
     /// Admin resolves a disputed escrow with an arbitrary buyer/farmer split. (#1299)
     ///
     /// `buyer_bps` (0..=10_000) is the buyer's share of the escrowed amount:
@@ -1564,6 +1672,18 @@ impl EscrowContract {
             .ok_or(EscrowError::NotFound)?;
 
         if escrow.status != EscrowStatus::Disputed {
+            return Err(EscrowError::NotDisputed);
+        }
+
+        // Verify the token stored at deposit time matches the escrow record.
+        let stored_token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(order_id))
+            .ok_or(EscrowError::NotFound)?;
+        if stored_token != escrow.token {
+            return Err(EscrowError::InvalidToken);
+        }
             return Err(EscrowError::NotInDispute);
         }
 
@@ -1612,16 +1732,17 @@ impl EscrowContract {
     }
 
     /// Admin proposes a new admin (first step of two-step transfer).
-    pub fn propose_admin(env: Env, new_admin: Address) {
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), EscrowError> {
         let mut transfer: AdminTransfer = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         transfer.current_admin.require_auth();
         transfer.pending_admin = Some(new_admin.clone());
         env.storage().instance().set(&DataKey::Admin, &transfer);
         env.events().publish(("admin", "proposed"), new_admin);
+        Ok(())
     }
 
     /// Pending admin accepts the transfer (second step).
@@ -1630,7 +1751,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         let pending = transfer
             .pending_admin
             .clone()
@@ -1650,7 +1771,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         transfer.current_admin.require_auth();
 
         let zero = BytesN::<32>::from_array(&env, &[0u8; 32]);
@@ -1829,7 +1950,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         transfer.current_admin.require_auth();
 
         let mut migrated: u32 = 0;
@@ -1912,7 +2033,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin not set");
+            .ok_or(EscrowError::NotInitialized)?;
         transfer.current_admin.require_auth();
 
         if members.len() as u32 > MAX_COOP_SIGNERS {
@@ -2498,7 +2619,7 @@ mod test {
             // Pre-store an escrow with order_id 200
             store_escrow(&env, 200, buyer.clone(), farmer.clone(), token.clone());
             let mut entries = Vec::new(&env);
-            entries.push_back((200_u64, buyer, farmer, token, 1000_i128, 9999_u64));
+            entries.push_back((200_u64, buyer, farmer, token, MIN_DEPOSIT_STROOPS, 9999_u64));
             let result = EscrowContract::batch_deposit(env, entries);
             assert_eq!(result, Err(EscrowError::AlreadyExists));
         });
@@ -2733,7 +2854,7 @@ mod test {
             };
             env.storage().instance().set(&DataKey::Admin, &transfer);
 
-            EscrowContract::set_reward_token(env.clone(), reward_token.clone());
+            EscrowContract::set_reward_token(env.clone(), reward_token.clone()).unwrap();
 
             let stored = env.storage().instance().get(&DataKey::RewardTokenContract);
             assert_eq!(stored, Some(reward_token));
@@ -2756,7 +2877,7 @@ mod test {
             };
             env.storage().instance().set(&DataKey::Admin, &transfer);
 
-            EscrowContract::set_reward_token(env, reward_token);
+            EscrowContract::set_reward_token(env, reward_token).unwrap();
         });
     }
 
@@ -3381,14 +3502,14 @@ mod test {
             let coop = Address::generate(&env);
 
             // Bypass balance / token by manually triggering the guard check.
-            // deposit returns InvalidAmount when royalty_bps > 10_000.
+            // deposit returns InvalidRoyalty when royalty_bps > 10_000.
             let bad_bps: u32 = 10_001;
             let result: Result<(), EscrowError> = if bad_bps > 10_000 {
-                Err(EscrowError::InvalidAmount)
+                Err(EscrowError::InvalidRoyalty)
             } else {
                 Ok(())
             };
-            assert_eq!(result, Err(EscrowError::InvalidAmount));
+            assert_eq!(result, Err(EscrowError::InvalidRoyalty));
 
             // Also verify via the actual amount <= 0 guard that runs first,
             // ensuring bad_bps guard is independent.
@@ -4097,6 +4218,11 @@ mod test {
             assert!(submit(i).is_ok(), "submission {} should succeed", i);
         }
         // 6th submission should fail
+        let mut hash_bytes = [6u8; 32];
+        let hash = BytesN::<32>::from_array(&env, &hash_bytes);
+        let result = EscrowContract::submit_evidence(env.clone(), 1, hash);
+        assert_eq!(result, Err(EscrowError::EvidenceLimitReached));
+    }
         assert_eq!(submit(6), Err(EscrowError::InvalidAmount));
         let contract_id = env.register(EscrowContract, ());
         let client = EscrowContractClient::new(&env, &contract_id);
@@ -5068,6 +5194,227 @@ mod deposit_path_test {
         Setup { env, client, token, buyer, farmer }
     }
 
+        let err = EscrowContract::deposit(
+            env,
+            token,
+            MAX_ORDER_ID,
+            buyer,
+            farmer,
+            100,
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(err, EscrowError::InvalidOrderId);
+    }
+
+    // ── #1292: batch_deposit shares deposit's validation ─────────────────────
+    //
+    // `token` is an unregistered address, so any token transfer would panic;
+    // a clean `Err` therefore also proves no tokens moved.
+
+    fn batch_entry(
+        env: &Env,
+        order_id: u64,
+        token: &Address,
+        amount: i128,
+        timeout_unix: u64,
+    ) -> (u64, Address, Address, Address, i128, u64) {
+        (
+            order_id,
+            Address::generate(env),
+            Address::generate(env),
+            token.clone(),
+            amount,
+            timeout_unix,
+        )
+    }
+
+    fn assert_batch_rejected(
+        env: &Env,
+        entries: Vec<(u64, Address, Address, Address, i128, u64)>,
+        expected: EscrowError,
+    ) {
+        let result = EscrowContract::batch_deposit(env.clone(), entries.clone());
+        assert_eq!(result, Err(expected));
+        for entry in entries.iter() {
+            assert!(!env.storage().persistent().has(&DataKey::Escrow(entry.0)));
+            assert!(!env.storage().persistent().has(&DataKey::Token(entry.0)));
+        }
+    }
+
+    #[test]
+    fn batch_deposit_rejects_duplicate_ids_within_batch() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let token = Address::generate(&env);
+            let timeout = env.ledger().timestamp() + MIN_TIMEOUT_SECS + 1;
+            let mut entries = Vec::new(&env);
+            entries.push_back(batch_entry(&env, 300, &token, MIN_DEPOSIT_STROOPS, timeout));
+            entries.push_back(batch_entry(&env, 300, &token, MIN_DEPOSIT_STROOPS, timeout));
+            assert_batch_rejected(&env, entries, EscrowError::AlreadyExists);
+        });
+    }
+
+    #[test]
+    fn batch_deposit_rejects_oversized_batch() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let token = Address::generate(&env);
+            let timeout = env.ledger().timestamp() + MIN_TIMEOUT_SECS + 1;
+            let mut entries = Vec::new(&env);
+            for i in 0..=MAX_BATCH_DEPOSIT {
+                entries.push_back(batch_entry(
+                    &env,
+                    400 + u64::from(i),
+                    &token,
+                    MIN_DEPOSIT_STROOPS,
+                    timeout,
+                ));
+            }
+            assert_batch_rejected(&env, entries, EscrowError::BatchTooLarge);
+        });
+    }
+
+    #[test]
+    fn batch_deposit_rejects_below_min_deposit() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let token = Address::generate(&env);
+            let timeout = env.ledger().timestamp() + MIN_TIMEOUT_SECS + 1;
+            let mut entries = Vec::new(&env);
+            entries.push_back(batch_entry(&env, 500, &token, MIN_DEPOSIT_STROOPS, timeout));
+            entries.push_back(batch_entry(&env, 501, &token, MIN_DEPOSIT_STROOPS - 1, timeout));
+            assert_batch_rejected(&env, entries, EscrowError::BelowMinDeposit);
+        });
+    }
+
+    #[test]
+    fn batch_deposit_rejects_short_timeout() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let token = Address::generate(&env);
+            let now = env.ledger().timestamp();
+            let mut entries = Vec::new(&env);
+            entries.push_back(batch_entry(&env, 600, &token, MIN_DEPOSIT_STROOPS, now + MIN_TIMEOUT_SECS + 1));
+            entries.push_back(batch_entry(&env, 601, &token, MIN_DEPOSIT_STROOPS, now + MIN_TIMEOUT_SECS - 1));
+            assert_batch_rejected(&env, entries, EscrowError::InvalidTimeout);
+        });
+    }
+
+    // ── #1293: refund cannot bypass an open dispute ──────────────────────────
+
+    #[test]
+    fn refund_after_timeout_while_disputed_returns_in_dispute() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        let token = env.register(NoopTokenContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            setup_admin(&env);
+            let buyer = Address::generate(&env);
+            let farmer = Address::generate(&env);
+            store_escrow(&env, 1, buyer.clone(), farmer, token.clone());
+            env.storage().persistent().set(&DataKey::Token(1), &token);
+
+            EscrowContract::dispute(env.clone(), 1, buyer).unwrap();
+            // store_escrow uses timeout_unix = 1_000.
+            env.ledger().set_timestamp(2_000);
+
+            assert_eq!(
+                EscrowContract::refund(env.clone(), 1),
+                Err(EscrowError::InDispute)
+            );
+            assert_eq!(
+                EscrowContract::claim_timeout_refund(env.clone(), 1),
+                Err(EscrowError::InDispute)
+            );
+
+            EscrowContract::resolve_dispute(env.clone(), 1, true).unwrap();
+            assert_eq!(
+                EscrowContract::get(env, 1).unwrap().status,
+                EscrowStatus::Released
+            );
+        });
+    }
+
+    #[test]
+    fn claim_timeout_refund_requires_no_auth() {
+        // No mock_all_auths(): any require_auth() call would panic.
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        let token = env.register(NoopTokenContract, ());
+        env.clone().as_contract(&contract_id, || {
+            let buyer = Address::generate(&env);
+            let farmer = Address::generate(&env);
+            store_escrow(&env, 1, buyer, farmer, token.clone());
+            env.storage().persistent().set(&DataKey::Token(1), &token);
+            env.ledger().set_timestamp(2_000);
+
+            EscrowContract::claim_timeout_refund(env.clone(), 1).unwrap();
+            assert_eq!(
+                EscrowContract::get(env, 1).unwrap().status,
+                EscrowStatus::Refunded
+            );
+        });
+    }
+
+    // ── #1294: a dispute can only be opened once ─────────────────────────────
+
+    #[test]
+    fn second_dispute_fails_and_keeps_dispute_opened_at() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let buyer = Address::generate(&env);
+            let farmer = Address::generate(&env);
+            let token = Address::generate(&env);
+            store_escrow(&env, 1, buyer.clone(), farmer.clone(), token);
+
+            env.ledger().set_timestamp(100);
+            EscrowContract::dispute(env.clone(), 1, buyer).unwrap();
+            let opened_at = EscrowContract::get(env.clone(), 1).unwrap().dispute_opened_at;
+            assert_eq!(opened_at, 100);
+
+            env.ledger().set_timestamp(5_000);
+            assert_eq!(
+                EscrowContract::dispute(env.clone(), 1, farmer),
+                Err(EscrowError::InDispute)
+            );
+            assert_eq!(
+                EscrowContract::get(env, 1).unwrap().dispute_opened_at,
+                opened_at
+            );
+        });
+    }
+
+    #[test]
+    fn dispute_after_auto_release_eligibility_blocks_auto_release() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        env.clone().as_contract(&contract_id, || {
+            let buyer = Address::generate(&env);
+            let farmer = Address::generate(&env);
+            let token = Address::generate(&env);
+            store_escrow(&env, 1, buyer.clone(), farmer, token);
+
+            // store_escrow uses auto_release_unix = 9_999_999.
+            env.ledger().set_timestamp(10_000_000);
+            EscrowContract::dispute(env.clone(), 1, buyer).unwrap();
+            assert_eq!(
+                EscrowContract::auto_release(env, 1),
+                Err(EscrowError::InDispute)
+            );
+        });
     fn deposit(s: &Setup, order_id: u64, buyer: &Address) {
         s.client.deposit(
             &s.token, &order_id, buyer, &s.farmer, &AMOUNT, &TIMEOUT, &None, &0, &0,

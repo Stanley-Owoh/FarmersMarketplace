@@ -23,6 +23,7 @@ const {
   createPreorderClaimableBalance,
   mintRewardTokens,
   invokeEscrowContract,
+  parseEscrowError,
   recordCarbonOffset,
   getCarbonOffset,
   generatePaymentLink,
@@ -1148,6 +1149,10 @@ router.post('/:id/refund', auth, async (req, res) => {
     await db.query('UPDATE orders SET escrow_status = $1, stellar_tx_hash = $2 WHERE id = $3', ['refunded', result.txHash, order.id]);
     return res.json({ success: true, txHash: result.txHash });
   } catch (e) {
+    const escrowErr = parseEscrowError(e);
+    if (escrowErr) {
+      return res.status(escrowErr.code === 'escrow_in_dispute' ? 409 : 402).json({ success: false, message: 'Refund failed: ' + escrowErr.message, code: escrowErr.code });
+    }
     return res.status(402).json({ success: false, message: 'Refund failed: ' + e.message, code: 'refund_failed' });
   }
 });

@@ -488,12 +488,20 @@ These codes are stable on-chain ABI values. Never reuse a code, even after remov
 | 14 | `AlreadyInitialized` | `initialize` called more than once |
 | 15 | `NotAdmin` | Caller does not hold the admin role |
 | 16 | `BelowMinDeposit` | Deposit amount is below the configured minimum (dust guard) |
-| 17 | `BatchTooLarge` | `batch_release` called with more than `MAX_BATCH_RELEASE` IDs |
+| 17 | `BatchTooLarge` | `batch_release` / `batch_deposit` called with more than 20 entries |
 | 18 | `SnapshotNotFound` | No snapshot exists for the requested (order_id, ledger_sequence) |
 | 19 | `NotYetReleasable` | Release called before the pre-order unlock date |
 | 20 | `SubmissionWindowClosed` | Evidence submission window (48 h) has closed |
 | 21 | `AutoReleaseNotReached` | Auto-release timestamp has not yet been reached |
 | 22 | `TooManyCoopSigners` | Cooperative signer count exceeds `MAX_COOP_SIGNERS` |
+| 23 | `InvalidTimeout` | Deposit timeout is shorter than `MIN_TIMEOUT_SECS` from now |
+| 24 | `InvalidOrderId` | `order_id` is at or above `MAX_ORDER_ID` |
+| 25 | `InvalidRoyalty` | Cooperative royalty exceeds 10 000 bps (100%) |
+| 26 | `EvidenceLimitReached` | Party already submitted the maximum number of evidence hashes |
+| 27 | `NotDisputed` | Operation requires the escrow to be disputed |
+| 28 | `NotInitialized` | Admin not configured; `initialize` has not been called |
+
+Next available code: **29**. See the `NEXT_CODE` comment in `contracts/escrow/src/lib.rs` for the authoritative value.
 | 23 | `NotInitialized` | A stored value settlement depends on (platform fee, fee destination, admin) is missing because `initialize` was never called |
 | 24 | `NotInDispute` | `resolve_dispute` called on an escrow that is not in the `Disputed` state |
 
