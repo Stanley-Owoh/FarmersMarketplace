@@ -30,10 +30,21 @@ const horizonUrl =
 const horizonUrl =
   process.env.STELLAR_HORIZON_URL ||
   (isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org');
+
 const sorobanRpcUrl =
   process.env.SOROBAN_RPC_URL ||
   (isTestnet ? 'https://soroban-testnet.stellar.org' : 'https://soroban.stellar.org');
 const networkPassphrase = isTestnet ? StellarSdk.Networks.TESTNET : StellarSdk.Networks.PUBLIC;
+
+function normalizeServerUrlCompat(serverInstance) {
+  if (serverInstance && serverInstance.serverURL && typeof serverInstance.serverURL.href === 'function') {
+    serverInstance.serverURL.href = String(serverInstance.serverURL.href());
+  }
+  return serverInstance;
+}
+
+const server = normalizeServerUrlCompat(new StellarSdk.Horizon.Server(horizonUrl));
+const sorobanServer = normalizeServerUrlCompat(new StellarSdk.SorobanRpc.Server(sorobanRpcUrl));
 const server = new StellarSdk.Horizon.Server(horizonUrl);
 const sorobanServer = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
 

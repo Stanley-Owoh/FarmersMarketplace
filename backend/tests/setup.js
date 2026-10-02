@@ -13,23 +13,38 @@ process.env.RATE_LIMIT_LOGIN_MAX = '10000';
 process.env.RATE_LIMIT_REGISTER_MAX = '10000';
 process.env.RATE_LIMIT_ORDER_USER_MAX = '10000';
 
-const mockDb = jest.requireMock('../src/db/schema');
+const appInstance = require('../src/app');
+const mockDb = require('../src/db/schema');
 
-// Expose mockQuery as a getter so it always points to the current mock function
-// (jest.setup.js replaces mockDb.query in beforeEach)
-const mockQueryProxy = new Proxy(
-  {},
-  {
-    get: (_, prop) => mockDb.query[prop].bind(mockDb.query),
-    apply: (_, thisArg, args) => mockDb.query(...args),
+function createLiveProxy(getter) {
+  return new Proxy(
+    function proxied() {},
+    {
+      get: (_, prop) => {
+        const current = getter();
+        const value = current?.[prop];
+        return typeof value === 'function' ? value.bind(current) : value;
+      },
+      apply: (_, __, args) => getter()(...args),
+    }
+  );
+}
+
+function getPreparedStatement(method) {
+  if (!mockDb.prepare.getMockImplementation()) {
+    mockDb.prepare.mockReturnValue(mockDb.statementMocks);
   }
-);
+  return mockDb.prepare()[method];
+}
 
-// Simple reference — tests should use mockDb.query directly or via this export
-const getMockQuery = () => mockDb.query;
+const mockQueryProxy = createLiveProxy(() => mockDb.query);
+const mockRunProxy = createLiveProxy(() => getPreparedStatement('run'));
+const mockGetProxy = createLiveProxy(() => getPreparedStatement('get'));
+const mockAllProxy = createLiveProxy(() => getPreparedStatement('all'));
+const mockPrepareProxy = createLiveProxy(() => mockDb.prepare);
+const mockTransactionProxy = createLiveProxy(() => mockDb.transaction);
 
 const request = require('supertest');
-const app = require('../src/app');
 
 async function getCsrf() {
   const res = await request(app).get('/api/csrf-token');
@@ -39,6 +54,7 @@ async function getCsrf() {
   return { token, cookieStr };
 }
 
+const app = appInstance;
 module.exports = {
   request,
   app,
@@ -47,17 +63,19 @@ module.exports = {
     return mockDb.query;
   },
   get mockRun() {
-    return mockDb.prepare()?.run;
+    return mockRunProxy;
   },
   get mockGet() {
-    return mockDb.prepare()?.get;
+    return mockGetProxy;
   },
   get mockAll() {
-    return mockDb.prepare()?.all;
+    return mockAllProxy;
   },
-  mockPrepare: mockDb.prepare,
+  get mockPrepare() {
+    return mockPrepareProxy;
+  },
   get mockTransaction() {
-    return mockDb.transaction;
+    return mockTransactionProxy;
   },
   getCsrf,
 };

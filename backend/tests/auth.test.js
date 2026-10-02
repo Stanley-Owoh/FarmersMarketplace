@@ -12,9 +12,7 @@ const VALID_PASSWORD = 'Secure1pass';
 
 describe('POST /api/auth/register', () => {
   it('registers a new user, returns access token and sets refresh cookie', async () => {
-    // INSERT user RETURNING id
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 });
-    // INSERT refresh_token
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
 
     const res = await request(app).post('/api/auth/register').send({
@@ -23,6 +21,7 @@ describe('POST /api/auth/register', () => {
       password: VALID_PASSWORD,
       role: 'farmer',
     });
+
     expect(res.status).toBe(200);
     expect(res.body.token).toBeDefined();
     expect(res.body.user.role).toBe('farmer');
@@ -99,18 +98,15 @@ describe('POST /api/auth/register', () => {
 describe('POST /api/auth/login', () => {
   it('logs in with correct credentials, returns access token and sets refresh cookie', async () => {
     const hashed = await bcrypt.hash(VALID_PASSWORD, 12);
-    // SELECT user
     mockQuery.mockResolvedValueOnce({
-      rows: [
-        {
-          id: 1,
-          name: 'Carol',
-          email: 'carol@test.com',
-          password: hashed,
-          role: 'buyer',
-          stellar_public_key: 'GPUB',
-        },
-      ],
+      rows: [{
+        id: 1,
+        name: 'Carol',
+        email: 'carol@test.com',
+        password: hashed,
+        role: 'buyer',
+        stellar_public_key: 'GPUB',
+      }],
       rowCount: 1,
     });
     // SELECT user_2fa_settings (2FA disabled)
@@ -121,6 +117,7 @@ describe('POST /api/auth/login', () => {
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: 'carol@test.com', password: VALID_PASSWORD });
+
     expect(res.status).toBe(200);
     expect(res.body.token).toBeDefined();
     const decoded = jwt.verify(res.body.token, SECRET);
@@ -140,6 +137,7 @@ describe('POST /api/auth/login', () => {
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: 'carol@test.com', password: 'wrongpass' });
+
     expect(res.status).toBe(401);
   });
 
@@ -149,6 +147,7 @@ describe('POST /api/auth/login', () => {
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: 'nobody@test.com', password: VALID_PASSWORD });
+
     expect(res.status).toBe(401);
   });
 
@@ -257,7 +256,7 @@ describe('POST /api/auth/refresh', () => {
 
   it('returns 401 for an invalid/unknown refresh token', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // token not found
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
     const res = await request(app)
       .post('/api/auth/refresh')
@@ -270,12 +269,24 @@ describe('POST /api/auth/refresh', () => {
 describe('PATCH /api/auth/password', () => {
   it('updates the current password and allows login with the new password', async () => {
     const oldHash = await bcrypt.hash('OldPass1', 12);
-    const newHash = await bcrypt.hash('NewSecure1', 12);
     const token = jwt.sign({ id: 1, role: 'buyer' }, SECRET, { expiresIn: '15m' });
 
     mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1, active: 1 }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: 1, password: oldHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 1,
+          name: 'Carol',
+          email: 'carol@test.com',
+          password: await bcrypt.hash('NewSecure1', 12),
+          role: 'buyer',
+          stellar_public_key: 'GPUB',
+        }],
+        rowCount: 1,
+      })
       .mockResolvedValueOnce({ rows: [{ id: 1, name: 'Carol', email: 'carol@test.com', password: newHash, role: 'buyer', stellar_public_key: 'GPUB' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });
@@ -300,12 +311,13 @@ describe('PATCH /api/auth/password', () => {
 describe('POST /api/auth/logout', () => {
   it('clears the refresh cookie on logout', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 }); // DELETE refresh_token
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
 
     const res = await request(app)
       .post('/api/auth/logout')
       .set('Cookie', `${cookieStr}; refreshToken=sometoken`)
       .set('X-CSRF-Token', csrf);
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     const cookie = res.headers['set-cookie']?.[0] || '';

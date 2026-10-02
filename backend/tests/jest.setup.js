@@ -15,6 +15,7 @@ process.env.RATE_LIMIT_ORDER_MAX = '10000';
 process.env.RATE_LIMIT_SEND_MAX = '10000';
 process.env.WEB_PUSH_VAPID_PUBLIC_KEY = process.env.WEB_PUSH_VAPID_PUBLIC_KEY || 'test-vapid-public-key';
 process.env.WEB_PUSH_VAPID_PRIVATE_KEY = process.env.WEB_PUSH_VAPID_PRIVATE_KEY || 'test-vapid-private-key';
+process.env.ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'test-encryption-secret-32-bytes-';
 process.env.RATE_LIMIT_ORDER_USER_MAX = process.env.RATE_LIMIT_ORDER_USER_MAX || '10000';
 
 // --- DB mock ---
@@ -24,22 +25,24 @@ jest.mock('../src/db/schema', () => ({
   transaction: jest.fn(),
   query: jest.fn(),
   isPostgres: false,
+  statementMocks: {
+    get: jest.fn(),
+    all: jest.fn(),
+    run: jest.fn(),
+  },
 }));
 
-// --- Stellar mock ---
 jest.mock('../src/utils/stellar', () => ({
+  STELLAR_NETWORK: 'testnet',
   isTestnet: true,
-  getOrderBook: jest.fn().mockResolvedValue({ bids: [], asks: [], base: 'XLM', counter: 'USDC' }),
-  server: {
-    payments: jest.fn(() => ({
-      forAccount: jest.fn().mockReturnThis(),
-      cursor: jest.fn().mockReturnThis(),
-      stream: jest.fn(() => jest.fn()), // returns a stop function
-    })),
-  },
   createWallet: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
-  createWalletFromMnemonic: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET', mnemonic: 'word '.repeat(12).trim() })),
+  createWalletFromMnemonic: jest.fn(() => ({
+    publicKey: 'GPUBKEY',
+    secretKey: 'SSECRET',
+    mnemonic: 'word '.repeat(12).trim(),
+  })),
   deriveKeypairFromMnemonic: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
+  fundTestnetAccount: jest.fn().mockResolvedValue({}),
   getBalance: jest.fn().mockResolvedValue(1000),
   getPlatformFeeInfo: jest.fn((amount) => ({
     feePercent: 0,
@@ -77,10 +80,9 @@ jest.mock('../src/utils/stellar', () => ({
   sendPayment: jest.fn().mockResolvedValue('TXHASH123'),
   createWallet: jest.fn(() => ({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' })),
   getBalance: jest.fn().mockResolvedValue(1000),
-  getTransactions: jest.fn().mockResolvedValue([]),
-  fundTestnetAccount: jest.fn().mockResolvedValue({}),
+  getTransactions: jest.fn().mockResolvedValue({ records: [], next_cursor: null, prev_cursor: null }),
   sendPayment: jest.fn().mockResolvedValue('TXHASH123'),
-  isTestnet: true,
+  getOrderBook: jest.fn().mockResolvedValue({ bids: [], asks: [], base: 'XLM', counter: 'USDC' }),
   createClaimableBalance: jest
     .fn()
     .mockResolvedValue({ txHash: 'ESCROW_TX', balanceId: 'BALANCE_ID_001' }),
@@ -88,7 +90,23 @@ jest.mock('../src/utils/stellar', () => ({
     .fn()
     .mockResolvedValue({ txHash: 'PREORDER_TX', balanceId: 'PREORDER_BALANCE_001' }),
   claimBalance: jest.fn().mockResolvedValue('CLAIM_TX_001'),
+  getContractState: jest.fn(),
+  getContractWasmHash: jest.fn().mockResolvedValue('0'.repeat(64)),
+  simulateContractCall: jest.fn(),
+  invokeContract: jest.fn(),
+  simulateContract: jest.fn(),
+  invokeEscrowContract: jest.fn().mockResolvedValue({ txHash: 'ESCROW_TX' }),
+  burnRewardTokens: jest.fn().mockResolvedValue({}),
+  getContractEvents: jest.fn().mockResolvedValue({ events: [] }),
+  server: {
+    payments: jest.fn(() => ({
+      forAccount: jest.fn().mockReturnThis(),
+      cursor: jest.fn().mockReturnThis(),
+      stream: jest.fn(() => jest.fn()),
+    })),
+  },
 }));
+
 
 // --- Missing utility mocks ---
 jest.mock('../src/utils/cdn', () => ({ rewriteImageUrl: (url) => url }));
@@ -192,20 +210,39 @@ jest.mock('../src/middleware/requestLogger', () => (req, res, next) => {
 // Reset all mocks before each test to prevent queue leakage
 beforeEach(() => {
   jest.resetAllMocks();
+  // Re-apply default implementations without replacing the mock function identity.
+  // The app and its tests share the same mock object, so the same function is used
+  // across route execution and assertions.
   // Re-apply default implementations after reset
   const geocheck = jest.requireMock('../src/utils/geocheck');
   geocheck.checkGeoFence.mockResolvedValue({ allowed: true });
   geocheck.checkCoordinateGeoFence.mockReturnValue({ checked: false, allowed: true, distanceKm: null, reason: null });
 
   const mockDb = jest.requireMock('../src/db/schema');
-  mockDb.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
-  mockDb.prepare = jest.fn(() => ({
-    get: jest.fn(),
-    all: jest.fn().mockReturnValue([]),
-    run: jest.fn().mockReturnValue({ lastInsertRowid: 1, changes: 1 }),
-  }));
-  mockDb.exec = jest.fn();
-  mockDb.transaction = jest.fn(
+  if (!mockDb.query || typeof mockDb.query.mockReset !== 'function') {
+    mockDb.query = jest.fn();
+  }
+  mockDb.query.mockReset();
+  mockDb.query.mockResolvedValue({ rows: [], rowCount: 0 });
+  if (!mockDb.prepare || typeof mockDb.prepare.mockReset !== 'function') {
+    mockDb.prepare = jest.fn();
+  }
+  mockDb.prepare.mockReset();
+  if (!mockDb.statementMocks) {
+    mockDb.statementMocks = { get: jest.fn(), all: jest.fn(), run: jest.fn() };
+  }
+  mockDb.prepare.mockReturnValue(mockDb.statementMocks);
+  mockDb.statementMocks.all.mockReturnValue([]);
+  mockDb.statementMocks.run.mockReturnValue({ lastInsertRowid: 1, changes: 1 });
+  if (!mockDb.exec || typeof mockDb.exec.mockReset !== 'function') {
+    mockDb.exec = jest.fn();
+  }
+  mockDb.exec.mockReset();
+  if (!mockDb.transaction || typeof mockDb.transaction.mockReset !== 'function') {
+    mockDb.transaction = jest.fn();
+  }
+  mockDb.transaction.mockReset();
+  mockDb.transaction.mockImplementation(
     (fn) =>
       (...args) =>
         fn(...args)
@@ -216,18 +253,30 @@ beforeEach(() => {
   idempotency.cacheResponse.mockResolvedValue(undefined);
 
   const stellar = jest.requireMock('../src/utils/stellar');
-  if (stellar.createWallet) stellar.createWallet.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
-  if (stellar.createWalletFromMnemonic) stellar.createWalletFromMnemonic.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET', mnemonic: 'word '.repeat(12).trim() });
-  if (stellar.deriveKeypairFromMnemonic) stellar.deriveKeypairFromMnemonic.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
-  if (stellar.getBalance) stellar.getBalance.mockResolvedValue(1000);
-  if (stellar.getTransactions) stellar.getTransactions.mockResolvedValue({ records: [], next_cursor: null, prev_cursor: null });
-  if (stellar.fundTestnetAccount) stellar.fundTestnetAccount.mockResolvedValue({});
-  if (stellar.sendPayment) stellar.sendPayment.mockResolvedValue('TXHASH123');
-  stellar.isTestnet = true;
-  if (stellar.createClaimableBalance) stellar.createClaimableBalance.mockResolvedValue({
+  stellar.createWallet.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
+  stellar.createWalletFromMnemonic.mockReturnValue({
+    publicKey: 'GPUBKEY',
+    secretKey: 'SSECRET',
+    mnemonic: 'word '.repeat(12).trim(),
+  });
+  stellar.deriveKeypairFromMnemonic.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
+  stellar.fundTestnetAccount.mockResolvedValue({});
+  stellar.getBalance.mockResolvedValue(1000);
+  stellar.getTransactions.mockResolvedValue({ records: [], next_cursor: null, prev_cursor: null });
+  stellar.sendPayment.mockResolvedValue('TXHASH123');
+  stellar.getOrderBook.mockResolvedValue({ bids: [], asks: [], base: 'XLM', counter: 'USDC' });
+  stellar.createClaimableBalance.mockResolvedValue({
     txHash: 'ESCROW_TX',
     balanceId: 'BALANCE_ID_001',
   });
+  stellar.createPreorderClaimableBalance.mockResolvedValue({
+    txHash: 'PREORDER_TX',
+    balanceId: 'PREORDER_BALANCE_001',
+  });
+  stellar.claimBalance.mockResolvedValue('CLAIM_TX_001');
+  stellar.getContractWasmHash.mockResolvedValue('0'.repeat(64));
+  stellar.invokeEscrowContract.mockResolvedValue({ txHash: 'ESCROW_TX' });
+  stellar.burnRewardTokens.mockResolvedValue({});
   if (stellar.claimBalance) stellar.claimBalance.mockResolvedValue('CLAIM_TX_001');
   stellar.createWallet?.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET' });
   stellar.createWalletFromMnemonic?.mockReturnValue({ publicKey: 'GPUBKEY', secretKey: 'SSECRET', mnemonic: 'word '.repeat(12).trim() });

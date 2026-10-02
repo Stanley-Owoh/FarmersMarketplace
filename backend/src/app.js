@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const logger = require('./logger');
-const REQUIRED_ENV = ['JWT_SECRET'];
+const REQUIRED_ENV = ['JWT_SECRET', 'ENCRYPTION_SECRET'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 const weakJwtSecret =
   process.env.NODE_ENV === 'production' &&

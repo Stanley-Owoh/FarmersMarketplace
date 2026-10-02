@@ -301,10 +301,12 @@ router.post('/login', loginRateLimit, validate.login, async (req, res) => {
   const rawRefresh = generateRefreshToken();
   await storeRefreshToken(user.id, rawRefresh);
 
+  // #836: set the refresh token before rotating the CSRF cookie so the refresh token
+  // remains the first Set-Cookie entry in the response and clients can persist it reliably.
+  res.cookie('refreshToken', rawRefresh, COOKIE_OPTIONS);
+
   // #836: Rotate CSRF token on every login to prevent token-fixation attacks.
   generateCsrfToken(res);
-
-  res.cookie('refreshToken', rawRefresh, COOKIE_OPTIONS);
   res.json({
     token: accessToken,
     user: {
