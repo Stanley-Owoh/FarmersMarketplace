@@ -97,6 +97,8 @@ pub enum DataKey {
     Paused,
     /// Addresses that have cast an unpause vote; cleared on successful unpause. (#854)
     UnpauseVotes,
+    /// Amount refunded for a settled escrow; keeps the original amount intact.
+    RefundedAmount(u64),
 }
 
 #[contracttype]
@@ -431,6 +433,8 @@ impl EscrowContract {
             .get(&key)
             .ok_or(EscrowError::NotFound)?;
 
+        record.buyer.require_auth();
+
         if record.status != EscrowStatus::Active {
             return Err(EscrowError::AlreadySettled);
         }
@@ -450,11 +454,15 @@ impl EscrowContract {
             None => record.amount,
         };
 
-        record.amount = refund_amount;
         record.status = EscrowStatus::Refunded;
 
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, TTL_MIN, TTL_MAX);
+        let refunded_key = DataKey::RefundedAmount(order_id);
+        env.storage().persistent().set(&refunded_key, &refund_amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&refunded_key, TTL_MIN, TTL_MAX);
 
         env.events().publish(
             (symbol_short!("escrow"), symbol_short!("refund"), order_id),
@@ -661,6 +669,19 @@ impl EscrowContract {
             .persistent()
             .get(&key)
             .ok_or(EscrowError::NotFound)
+    }
+
+    /// Returns the amount refunded for a settled escrow, or `None` if it has
+    /// not been refunded.
+    pub fn refunded_amount(env: Env, order_id: u64) -> Result<Option<i128>, EscrowError> {
+        let escrow_key = DataKey::Escrow(order_id);
+        if !env.storage().persistent().has(&escrow_key) {
+            return Err(EscrowError::NotFound);
+        }
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::RefundedAmount(order_id)))
     }
 
     /// Returns true if the contract is currently paused. (#854)

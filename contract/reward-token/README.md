@@ -39,3 +39,17 @@ REWARD_TOKEN_ADMIN_SECRET=<admin_secret_key>
 ## Usage
 
 Tokens are automatically minted to buyers after successful purchases (1 FRT per 1 XLM spent).
+
+Balance entries refresh their persistent-storage TTL whenever a balance changes,
+so active balances are not archived simply because they were written without a
+TTL bump. Balances that were already archived before this behavior was deployed
+must be restored through Soroban's archived-entry restoration flow before they
+can be read or changed.
+
+Redemptions are tracked per buyer and order. A buyer can redeem once for an
+order, and an admin refund reissue must restore the exact redeemed amount once;
+the on-chain redemption record is kept alive for roughly 289 days.
+
+`mint_for_order` is authorized by the configured minter and follows the same
+supply-cap and vesting path as `mint`. The transfer fee must be below 100%,
+and a nonzero maximum supply cannot be lowered below current total supply.
