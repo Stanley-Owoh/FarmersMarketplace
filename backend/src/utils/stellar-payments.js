@@ -127,6 +127,45 @@ async function getTransactions(publicKey, { cursor, limit = 20 } = {}) {
 }
 
 /**
+ * Find recent native-XLM payments matching one of the expected SEP-0007 order memos.
+ * @param {string} destination
+ * @param {Array<{ memo: string, amount: number|string }>} expectedPayments
+ * @returns {Promise<Map<string, string>>} Map of memo to transaction hash
+ */
+async function findIncomingPaymentsByMemo(destination, expectedPayments) {
+  if (!destination || expectedPayments.length === 0) return new Map();
+
+  const expectedByMemo = new Map(
+    expectedPayments.map(({ memo, amount }) => [memo, Math.round(Number(amount) * 1e7)])
+  );
+  const amounts = new Set(expectedByMemo.values());
+  const { records } = await server
+    .payments()
+    .forAccount(destination)
+    .order('desc')
+    .limit(200)
+    .call();
+  const candidates = records.filter(
+    (payment) =>
+      payment.type === 'payment' &&
+      payment.asset_type === 'native' &&
+      payment.to === destination &&
+      amounts.has(Math.round(Number(payment.amount) * 1e7))
+  );
+
+  const matches = new Map();
+  for (const payment of candidates) {
+    const transaction = await server.transactions().transaction(payment.transaction_hash).call();
+    if (transaction.successful === false || transaction.memo_type !== 'text') continue;
+    const expectedAmount = expectedByMemo.get(transaction.memo);
+    if (expectedAmount !== Math.round(Number(payment.amount) * 1e7)) continue;
+    matches.set(transaction.memo, payment.transaction_hash);
+  }
+
+  return matches;
+}
+
+/**
  * Builds a `web+stellar:pay?…` URI for wallet deep-linking.
  * @param {{ destination: string, amount: number|string, assetCode: string, assetIssuer: string, memo?: string }} params
  * @returns {string}
@@ -447,6 +486,7 @@ async function getOrderBook(
 module.exports = {
   sendPayment,
   getTransactions,
+  findIncomingPaymentsByMemo,
   generatePaymentLink,
   getPlatformFeeInfo,
   getPathPaymentSendMax,
